@@ -29,7 +29,8 @@ class AgentAnswer:
 
 
 class AgentRunner(Protocol):
-    async def ask(self, question: str, resume_session_id: str | None = None) -> AgentAnswer: ...
+    async def ask(self, question: str, resume_session_id: str | None = None,
+                  images: list[dict[str, Any]] | None = None) -> AgentAnswer: ...
 
 
 def build_system_prompt(settings: Settings) -> str:
@@ -107,12 +108,29 @@ def parse_usage(usage: dict[str, Any] | None) -> TokenUsage:
     )
 
 
+def user_prompt(question: str, images: list[dict[str, Any]] | None):
+    """画像がなければ文字列のまま渡す。画像があれば、文字と画像を並べたメッセージとして渡す"""
+    if not images:
+        return question
+
+    async def messages():
+        yield {
+            "type": "user",
+            "session_id": "",
+            "message": {"role": "user", "content": [{"type": "text", "text": question}, *images]},
+            "parent_tool_use_id": None,
+        }
+
+    return messages()
+
+
 class ClaudeAgentRunner:
     def __init__(self, settings: Settings, repo: VersionRepo):
         self.settings = settings
         self.repo = repo
 
-    async def ask(self, question: str, resume_session_id: str | None = None) -> AgentAnswer:
+    async def ask(self, question: str, resume_session_id: str | None = None,
+                  images: list[dict[str, Any]] | None = None) -> AgentAnswer:
         from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock, query
 
         options = build_options(self.settings, self.repo, resume_session_id)
@@ -121,7 +139,7 @@ class ClaudeAgentRunner:
         cli_version: str | None = None
         result: ResultMessage | None = None
 
-        async for message in query(prompt=question, options=options):
+        async for message in query(prompt=user_prompt(question, images), options=options):
             if isinstance(message, SystemMessage) and message.subtype == "init":
                 auth_source = message.data.get("apiKeySource")
                 # 実際に動いた Claude Code の版(同梱版ではなく PATH 上の古い版が使われていないかの確認用)
@@ -166,10 +184,13 @@ class FakeAgentRunner:
     def __init__(self, model: str = "claude-sonnet-5-5"):
         self.model = model
         self.calls: list[tuple[str, str | None]] = []
+        self.images: list[list[dict[str, Any]]] = []
         self._turns: dict[str, int] = {}
 
-    async def ask(self, question: str, resume_session_id: str | None = None) -> AgentAnswer:
+    async def ask(self, question: str, resume_session_id: str | None = None,
+                  images: list[dict[str, Any]] | None = None) -> AgentAnswer:
         self.calls.append((question, resume_session_id))
+        self.images.append(images or [])
         n = len(self.calls)
         session = resume_session_id or f"fake-session-{n}"
         # 本物の Claude Code と同じく、会話を再開するとセッションの合計を返す

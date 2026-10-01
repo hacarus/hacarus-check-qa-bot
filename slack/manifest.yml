@@ -4,10 +4,9 @@
 display_information:
   name: HACARUS Check 相談窓口
   description: HACARUS Check 2025 のリポジトリについて質問できるボット(読み取り専用)
+# AI アプリのパネル(会話の一覧)は最初は使わない。使うときは features に assistant_view、
+# スコープに assistant:write、イベントに assistant_thread_started を足し、.env を SLACK_ASSISTANT=true にする(docs/slack-app.md)
 features:
-  # AI アプリのパネル(会話の一覧・新しいチャット・質問例)
-  assistant_view:
-    assistant_description: HACARUS Check 2025 の機能・仕様・不具合・リリース内容について、バージョンを指定して質問できます
   app_home:
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
@@ -22,7 +21,6 @@ features:
 oauth_config:
   scopes:
     bot:
-      - assistant:write
       - app_mentions:read
       - chat:write
       - im:history
@@ -33,13 +31,13 @@ oauth_config:
       - channels:read
       - groups:read
       - commands
+      # 質問に添付されたスクリーンショットやログを読む
+      - files:read
       # ALLOWED_SLACK_USERS / ADMIN_SLACK_USERS に書いたユーザーグループのメンバーを読む
       - usergroups:read
 settings:
   event_subscriptions:
     bot_events:
-      - assistant_thread_started
-      - assistant_thread_context_changed
       - app_mention
       - message.im
   # 評価ボタンと 👎 の理由の入力に使う

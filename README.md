@@ -6,8 +6,9 @@
 
 ## できること
 
-- Slack の AI アプリのパネルで質問する。会話は一覧から選んで続けられ、最初の質問がタイトルになる
-- チャンネルでボットにメンションしても答える
+- Slack でボットに DM すると答える。スレッドで返信すると会話が続く
+- チャンネルでボットにメンションしても答える。そのスレッドの直前の発言も背景として読む
+- スクリーンショットやログを添付して質問できる
 - 質問の文中でバージョンを指定できる(「v3.2.1 で…」「v3.2.1 から v3.3.2 に上げると…」)。指定がなければ最新の正式リリースで答える
 - 回答ごとに 👍 / 👎 で評価でき、👎 のときは理由を任意で書ける
 - 質問ごとのトークン数を記録し、API の従量課金だった場合の料金(仮想料金)を集計する
@@ -54,7 +55,7 @@ task chat        # 対話形式で質問する(/new で新しい会話、/cost �
 1. 情シスに `slack/manifest.yml` でアプリを作ってもらい、Bot User OAuth Token(`xoxb-`)と、`connections:write` の App-Level Token(`xapp-`)を受け取る
 2. `.env` の `SLACK_BOT_TOKEN`、`SLACK_APP_TOKEN` と、`ALLOWED_SLACK_USERS` と `ADMIN_SLACK_USERS` に自分の Slack メンバー ID を1つだけ書く
    - `AUTH_MODE=subscription` のままなら、自分以外の ID を書くと起動を拒否する。ほかの人が話しかけても答えない
-3. `task check` で「Slack 連携: 有効」と出たら `task slack` で起動し、Slack の AI アプリのパネルか DM で質問する(試している間は PC を起動したままにする)
+3. `task check` で「Slack 連携: 有効」と出たら `task slack` で起動し、ボットに DM で質問する(試している間は PC を起動したままにする)
 
 ### 仮想料金と評価の確認
 
@@ -95,7 +96,7 @@ task register USER=qa-bot SSH_KEY=C:\qa-bot\keys\deploy_key
 
 ## 情シスなどに依頼すること
 
-- 社内の Slack で AI アプリ機能を使えるか(有料プランと管理者の設定)と、アプリの追加の許可
+- 社内の Slack へのアプリの追加の許可
   - `slack/manifest.yml` をそのまま使える。Socket Mode なので、公開 URL やファイアウォールの穴あけは不要
 - 共有機での実行と、ボット専用の Windows ユーザーの作成
 - hacarus-check-2025 への読み取り専用の Deploy key の登録(リポジトリの管理者)

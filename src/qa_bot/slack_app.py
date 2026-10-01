@@ -1,4 +1,4 @@
-"""Slack の受け口(AI アプリのパネル、チャンネルでのメンション、評価ボタン、/qa-cost)
+"""Slack の受け口(DM、チャンネルでのメンション、AI アプリのパネル、評価ボタン、/qa-cost)
 
 処理の本体は SlackHandlers に分け、Slack に接続しなくてもテストできるようにしている。
 """
@@ -10,6 +10,7 @@ import logging
 import re
 from typing import Any, Awaitable, Callable
 
+from . import attachments as att
 from .config import Settings
 from .pricing import PriceTable
 from .report import format_summary, summarize
@@ -26,9 +27,11 @@ MAX_SECTIONS = 40
 NOT_ALLOWED_MESSAGE = "このボットは試験運用中のため、利用できるメンバーを限定しています。"
 EXTERNAL_CHANNEL_MESSAGE = (
     "社外の方が参加しているチャンネルでは、社内向けの情報を含むためお答えできません。"
-    "DM か AI アプリのパネルで質問してください。"
+    "ボットへの DM で質問してください。"
 )
-CHANNEL_NOT_ALLOWED_MESSAGE = "このチャンネルではお答えできません。DM か AI アプリのパネルで質問してください。"
+CHANNEL_NOT_ALLOWED_MESSAGE = "このチャンネルではお答えできません。ボットへの DM で質問してください。"
+# 文字を書かずにファイルだけを送られたときの質問
+FILES_ONLY_QUESTION = "添付したファイルの内容から、何が起きているか、どう対処すればよいかを教えてください。"
 # 文脈として読む、質問より前の発言の範囲(スレッドの外でメンションされたとき)
 CONTEXT_WINDOW_SECONDS = 60 * 60
 CONTEXT_MAX_CHARS = 6000
@@ -88,11 +91,20 @@ def split_text(text: str, size: int = SECTION_CHARS) -> list[str]:
     return chunks or [""]
 
 
-def answer_blocks(text: str, footer: str | None, question_id: int | None) -> list[dict[str, Any]]:
+def skipped_note(skipped: list[att.Skipped]) -> str | None:
+    if not skipped:
+        return None
+    return "📎 読めなかった添付: " + "、".join(f"{s.name}({s.reason})" for s in skipped)
+
+
+def answer_blocks(text: str, footer: str | None, question_id: int | None,
+                  note: str | None = None) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
         for chunk in split_text(to_mrkdwn(text))[:MAX_SECTIONS]
     ]
+    if note:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": note}]})
     if footer:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
     if question_id is not None:
@@ -128,10 +140,13 @@ def bad_reason_view(question_id: int) -> dict[str, Any]:
 
 
 class SlackHandlers:
-    def __init__(self, settings: Settings, service: QAService, prices: PriceTable):
+    def __init__(self, settings: Settings, service: QAService, prices: PriceTable,
+                 fetch: att.Fetcher | None = None):
         self.settings = settings
         self.service = service
         self.prices = prices
+        # 添付ファイルを Slack から取得する(テストでは差し替える)
+        self.fetch = fetch or (att.slack_fetcher(settings.slack_bot_token) if settings.slack_bot_token else None)
 
     # ----- 回答を作る共通部分 -----
 
@@ -142,11 +157,30 @@ class SlackHandlers:
         cost = "不明" if result.virtual_cost_usd is None else f"${result.virtual_cost_usd:.3f}"
         return f"{result.answer.num_turns} 往復 / 仮想料金 {cost} / {self.settings.auth_mode}"
 
+    async def _load_files(self, client: Any, files: list[dict[str, Any]]) -> tuple[list[att.Attachment], list[att.Skipped]]:
+        if not files:
+            return [], []
+        if self.fetch is None:
+            return [], [att.Skipped(f.get("name") or "(名前なし)", "ファイルを取得する設定がない") for f in files]
+        full: list[dict[str, Any]] = []
+        for f in files:
+            # 大きなイベントでは、ファイルの情報が省かれて届くことがある
+            if f.get("file_access") == "check_file_info" and f.get("id"):
+                try:
+                    f = (await client.files_info(file=f["id"]))["file"]
+                except Exception:
+                    log.warning("ファイル %s の情報を読めませんでした", f.get("id"), exc_info=True)
+            full.append(f)
+        return await att.load(full, self.fetch)
+
     async def _answer(self, user: str, question: str, thread_key: str, channel: str,
-                      in_channel: bool = False, context: str | None = None) -> tuple[str, list | None]:
+                      in_channel: bool = False, context: str | None = None,
+                      attachments: list[att.Attachment] | None = None,
+                      note: str | None = None) -> tuple[str, list | None]:
         """利用者に返すテキストと Block Kit のブロックを作る"""
         try:
-            result = await self.service.ask(user, question, thread_key=thread_key, channel=channel, context=context)
+            result = await self.service.ask(user, question, thread_key=thread_key, channel=channel, context=context,
+                                            attachments=attachments)
         except NotAllowedError:
             return NOT_ALLOWED_MESSAGE, None
         except DailyLimitError as e:
@@ -158,7 +192,7 @@ class SlackHandlers:
         text = result.answer.text or "(回答が空でした)"
         if result.answer.is_error:
             text = f":warning: {text}"
-        return text[:3000], answer_blocks(text, self._footer(result, in_channel), result.question_id)
+        return text[:3000], answer_blocks(text, self._footer(result, in_channel), result.question_id, note)
 
     # ----- AI アプリのパネル -----
 
@@ -172,23 +206,28 @@ class SlackHandlers:
         say: Callable[..., Awaitable[Any]],
         set_status: Callable[..., Awaitable[Any]],
         set_title: Callable[..., Awaitable[Any]],
+        client: Any = None,
     ) -> None:
         user = payload.get("user", "")
         question = (payload.get("text") or "").strip()
+        files = payload.get("files") or []
         channel = payload["channel"]
         thread_ts = payload.get("thread_ts") or payload["ts"]
         if not self.service.is_allowed(user):
             await say(NOT_ALLOWED_MESSAGE)
             return
-        if not question:
+        if not question and not files:
             await say("質問を書いてください。")
             return
+        question = question or FILES_ONLY_QUESTION
         thread_key = f"{channel}:{thread_ts}"
         if self.service.store.get_session(thread_key) is None:
             # 会話の一覧で見分けやすいよう、最初の質問をタイトルにする
             await set_title(question[:60])
         await set_status(THINKING_STATUS, loading_messages=LOADING_MESSAGES)
-        text, blocks = await self._answer(user, question, thread_key, channel)
+        loaded, skipped = await self._load_files(client, files)
+        text, blocks = await self._answer(user, question, thread_key, channel, attachments=loaded,
+                                          note=skipped_note(skipped))
         if blocks:
             await say(text=text, blocks=blocks)
         else:
@@ -197,7 +236,8 @@ class SlackHandlers:
     # ----- チャンネルでのメンション -----
 
     async def handle_mention(self, event: dict[str, Any], client: Any, body: dict[str, Any] | None = None) -> None:
-        if event.get("bot_id") or event.get("subtype"):
+        # ファイルを添付した発言は subtype が file_share になる
+        if event.get("bot_id") or event.get("subtype") not in (None, "file_share"):
             return
         user = event.get("user", "")
         channel = event["channel"]
@@ -220,14 +260,22 @@ class SlackHandlers:
         if not self.service.is_allowed(user):
             await reply(NOT_ALLOWED_MESSAGE)
             return
-        if not question:
+        files = list(event.get("files") or [])
+        if not question and not files:
             await reply("質問を書いてください。")
             return
+        question = question or FILES_ONLY_QUESTION
 
-        context = await self._thread_context(client, event) if in_channel else None
+        context = None
+        if in_channel:
+            context, context_files = await self._thread_context(client, event)
+            # スレッドに先に貼られたスクリーンショットやログも読む(質問に添付したものを優先する)
+            files += context_files
         placeholder = await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=":mag: " + THINKING_STATUS)
+        loaded, skipped = await self._load_files(client, files)
         text, blocks = await self._answer(user, question, f"{channel}:{thread_ts}", channel,
-                                          in_channel=in_channel, context=context)
+                                          in_channel=in_channel, context=context, attachments=loaded,
+                                          note=skipped_note(skipped))
         await client.chat_update(channel=channel, ts=placeholder["ts"], text=text, blocks=blocks or [])
 
     async def _is_shared_with_outside(self, client: Any, channel: str) -> bool:
@@ -238,11 +286,11 @@ class SlackHandlers:
             return False
         return bool(info.get("is_ext_shared") or info.get("is_pending_ext_shared"))
 
-    async def _thread_context(self, client: Any, event: dict[str, Any]) -> str | None:
-        """メンションされた発言より前の、人どうしの発言を読む(ボットがまだ見ていない分だけ)"""
+    async def _thread_context(self, client: Any, event: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]]]:
+        """メンションされた発言より前の、人どうしの発言と添付ファイルを読む(ボットがまだ見ていない分だけ)"""
         limit = self.settings.thread_context_messages
         if limit <= 0:
-            return None
+            return None, []
         channel, ts = event["channel"], float(event["ts"])
         try:
             if event.get("thread_ts"):
@@ -258,11 +306,13 @@ class SlackHandlers:
                             if float(m["ts"]) >= ts - CONTEXT_WINDOW_SECONDS]
         except Exception:
             log.warning("スレッドの発言を読めませんでした(権限が足りない可能性があります)", exc_info=True)
-            return None
-        lines = [f"<@{m.get('user', '?')}>: {m['text']}" for m in messages
-                 if not m.get("bot_id") and not m.get("subtype") and m.get("text")][-limit:]
+            return None, []
+        human = [m for m in messages if not m.get("bot_id") and m.get("subtype") in (None, "file_share")][-limit:]
+        lines = [f"<@{m.get('user', '?')}>: {m['text']}" for m in human if m.get("text")]
+        # 新しい発言の添付から先に読む
+        files = [f for m in reversed(human) for f in m.get("files") or []]
         text = "\n".join(lines)
-        return text[-CONTEXT_MAX_CHARS:] or None
+        return text[-CONTEXT_MAX_CHARS:] or None, files
 
     # ----- 評価 -----
 
@@ -305,17 +355,20 @@ def build_app(settings: Settings, service: QAService, prices: PriceTable):
 
     app = AsyncApp(token=settings.slack_bot_token)
     handlers = SlackHandlers(settings, service, prices)
-    assistant = AsyncAssistant()
 
-    @assistant.thread_started
-    async def on_thread_started(say, set_suggested_prompts):
-        await handlers.thread_started(say, set_suggested_prompts)
+    if settings.slack_assistant:
+        # AI アプリのパネルを使うときだけ登録する。登録すると、DM のスレッドでの返信もパネル側で受け取る
+        assistant = AsyncAssistant()
 
-    @assistant.user_message
-    async def on_user_message(payload, say, set_status, set_title):
-        await handlers.assistant_message(payload, say, set_status, set_title)
+        @assistant.thread_started
+        async def on_thread_started(say, set_suggested_prompts):
+            await handlers.thread_started(say, set_suggested_prompts)
 
-    app.use(assistant)
+        @assistant.user_message
+        async def on_user_message(payload, say, set_status, set_title, client):
+            await handlers.assistant_message(payload, say, set_status, set_title, client)
+
+        app.use(assistant)
 
     @app.event("app_mention")
     async def on_mention(event, client, body):
@@ -323,7 +376,7 @@ def build_app(settings: Settings, service: QAService, prices: PriceTable):
 
     @app.event("message")
     async def on_message(event, client, body):
-        # AI アプリのパネル以外の DM(メッセージタブ)にも答える
+        # ボットへの DM に答える(チャンネルの発言はメンションされたときだけ app_mention で受け取る)
         if event.get("channel_type") == "im":
             await handlers.handle_mention(event, client, body)
 

@@ -52,6 +52,8 @@ class Settings:
     allowed_channels: frozenset[str] | None = None  # None はボットを招待したすべてのチャンネル
     thread_context_messages: int = 20
     log_question_text: bool = True
+    # AI アプリのパネル(会話の一覧)を使う。Slack アプリ側でも AI アプリの機能を有効にする必要がある
+    slack_assistant: bool = False
 
     @property
     def db_path(self) -> Path:
@@ -216,4 +218,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         allowed_channels=frozenset(_split(env.get("ALLOWED_CHANNELS"))) or None,
         thread_context_messages=_int(env, "THREAD_CONTEXT_MESSAGES", 20),
         log_question_text=_bool(env.get("LOG_QUESTION_TEXT"), True),
+        slack_assistant=_bool(env.get("SLACK_ASSISTANT"), False),
     )

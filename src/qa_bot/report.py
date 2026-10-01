@@ -140,7 +140,7 @@ def export_csv(store: Store, month: str | None = None) -> str:
     w = csv.writer(buf)
     w.writerow([
         "id", "asked_at_utc", "user_id", "auth_mode", "auth_source", "cli_version", "configured_model", "resumed",
-        "num_turns", "duration_ms", "is_error", "subtype", "permission_denials",
+        "num_turns", "duration_ms", "is_error", "subtype", "permission_denials", "attachments",
         "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens",
         "virtual_cost_usd", "sdk_cost_usd", "models", "good", "bad", "bad_reasons", "question", "answer",
     ])
@@ -150,6 +150,7 @@ def export_csv(store: Store, month: str | None = None) -> str:
         w.writerow([
             r["id"], r["asked_at"], r["user_id"], r["auth_mode"], r["auth_source"], r["cli_version"], r["configured_model"],
             r["resumed"], r["num_turns"], r["duration_ms"], r["is_error"], r["subtype"], r["permission_denials"],
+            r["attachments"],
             sum(m["input_tokens"] for m in ms), sum(m["output_tokens"] for m in ms),
             sum(m["cache_write_tokens"] for m in ms), sum(m["cache_read_tokens"] for m in ms),
             r["virtual_cost_usd"], r["sdk_cost_usd"], " ".join(sorted({m["model"] for m in ms})),

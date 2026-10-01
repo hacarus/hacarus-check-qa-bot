@@ -86,7 +86,7 @@ async def test_再開に失敗したら新しい会話として答える(service
     await service.ask(CLI_USER_ID, "1つめ", thread_key="t1")
     original = runner.ask
 
-    async def flaky(question, resume_session_id=None):
+    async def flaky(question, resume_session_id=None, images=None):
         if resume_session_id:
             raise RuntimeError("session not found")
         return await original(question, resume_session_id)
@@ -208,7 +208,7 @@ async def test_上限に達したら案内する(base_env, runner, prices):
 
 
 async def test_長い回答は複数のブロックに分ける(handlers, runner):
-    async def long_answer(question, resume_session_id=None):
+    async def long_answer(question, resume_session_id=None, images=None):
         return AgentAnswer(text=("あ" * 100 + "\n") * 80, session_id="s")
 
     runner.ask = long_answer
