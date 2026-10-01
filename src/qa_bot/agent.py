@@ -80,6 +80,8 @@ def build_options(settings: Settings, repo: VersionRepo, resume_session_id: str 
         kwargs["effort"] = settings.effort
     if resume_session_id:
         kwargs["resume"] = resume_session_id
+    if settings.claude_cli_path:
+        kwargs["cli_path"] = settings.claude_cli_path
     return ClaudeAgentOptions(**kwargs)
 
 

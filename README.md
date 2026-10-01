@@ -42,6 +42,7 @@ task chat        # 対話形式で質問する(/new で新しい会話、/cost �
 ```
 
 - 手元で Claude Code にログイン済みなら、そのアカウントの使用枠で動きます
+- Windows 向けの claude-agent-sdk は、Claude Code(claude.exe)を同梱していない版があります。その場合は PC にインストールした Claude Code が使われます。`task check` の「Claude Code」の行で版を確かめ、古いと出たら `claude update` で更新してください(古い版は新しいモデルを知らず、`[claude-code:unrecognized_model]` と表示されます)
 - `AUTH_MODE=subscription` のときは、Slack の利用者に自分以外を指定すると起動を拒否します。個人の使用枠をほかの人に使わせると規約違反になるためです
 - `task ask FAKE=1 -- 質問` とすると、Claude を呼ばずにダミーの回答を返します。記録や集計の流れだけを確かめるときに使います
 - `task` を使わずに `.venv\Scripts\qa-bot ask "質問"` のように直接実行することもできます

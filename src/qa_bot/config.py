@@ -41,6 +41,7 @@ class Settings:
     retention_days: int = 365
     session_retention_days: int = 30
     git_path: str = "git"
+    claude_cli_path: str | None = None
     slack_bot_token: str | None = field(default=None, repr=False)
     slack_app_token: str | None = field(default=None, repr=False)
     show_cost_footer: bool = True
@@ -176,6 +177,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         retention_days=_int(env, "RETENTION_DAYS", 365),
         session_retention_days=_int(env, "SESSION_RETENTION_DAYS", 30),
         git_path=env.get("GIT_PATH", "git").strip() or "git",
+        claude_cli_path=env.get("CLAUDE_CLI_PATH", "").strip() or None,
         slack_bot_token=env.get("SLACK_BOT_TOKEN", "").strip() or None,
         slack_app_token=env.get("SLACK_APP_TOKEN", "").strip() or None,
         show_cost_footer=_bool(env.get("SHOW_COST_FOOTER"), True),

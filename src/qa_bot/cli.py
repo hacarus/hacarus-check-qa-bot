@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .agent import ClaudeAgentRunner, FakeAgentRunner, delete_session
+from .claude_cli import VERIFIED_CLI_VERSION, find_cli, older_than
 from .config import CLI_USER_ID, ConfigError, Settings, load_settings
 from .guard import is_allowed
 from .pricing import PriceTable
@@ -67,6 +68,15 @@ def cmd_check(settings: Settings, _args) -> int:
     except VersionError as e:
         print(f"バージョン      : 取得できません({e})", file=sys.stderr)
         ok = False
+
+    cli = find_cli(settings.claude_cli_path)
+    print(f"Claude Code     : {cli.version or '不明'}({cli.source}{': ' + cli.path if cli.path else ''})")
+    if cli.path is None:
+        print("  NG: Claude Code が見つかりません。Claude Code をインストールするか CLAUDE_CLI_PATH を設定してください")
+        ok = False
+    elif cli.version and older_than(cli.version, VERIFIED_CLI_VERSION):
+        print(f"  注意: {VERIFIED_CLI_VERSION} より古い版です。{settings.model} を知らない可能性があり、"
+              "その場合はモデルに合わせた設定が使われません。`claude update` で更新してください")
 
     prices = PriceTable.load(settings.pricing_path)
     if prices.find(settings.model) is None:
