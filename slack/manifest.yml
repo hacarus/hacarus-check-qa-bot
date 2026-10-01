@@ -1,0 +1,35 @@
+# 情シスに Slack アプリを作ってもらうときのマニフェスト
+# https://api.slack.com/apps →「Create New App」→「From an app manifest」に貼り付ける
+display_information:
+  name: HACARUS Check 相談窓口
+  description: HACARUS Check 2025 のリポジトリについて質問できるボット(読み取り専用)
+features:
+  bot_user:
+    display_name: check-qa
+    always_online: true
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  slash_commands:
+    - command: /qa-cost
+      description: 仮想料金の集計を表示する(管理者のみ)
+      usage_hint: "[YYYY-MM]"
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - im:history
+      - commands
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: false
+  # 公開 URL が不要な Socket Mode を使う。App-Level Token(connections:write)の発行が別途必要
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

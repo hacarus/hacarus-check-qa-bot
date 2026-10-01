@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hacarus-check-qa-bot"
+version = "0.1.0"
+description = "HACARUS Check 2025 リポジトリに読み取り専用で質問できる社内相談ボット"
+requires-python = ">=3.11"
+dependencies = [
+    "claude-agent-sdk>=0.2.163",
+    "slack_bolt>=1.30",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+qa-bot = "qa_bot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
