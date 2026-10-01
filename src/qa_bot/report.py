@@ -26,6 +26,8 @@ class Summary:
     by_user: dict[str, tuple[int, float]] = field(default_factory=dict)
     what_if: dict[str, float] = field(default_factory=dict)
     auth_modes: dict[str, int] = field(default_factory=dict)
+    good: int = 0
+    bad: int = 0
 
     @property
     def avg_usd(self) -> float:
@@ -65,6 +67,12 @@ def summarize(store: Store, prices: PriceTable, month: str | None = None) -> Sum
         )
     s.by_model = dict(by_model)
 
+    for f in store.feedback_rows(month):
+        if f["rating"] > 0:
+            s.good += 1
+        else:
+            s.bad += 1
+
     # 同じトークン数を別のモデルの単価で数え直した場合の料金(実際にはモデルでトークン数も変わる点に注意)
     total_usage = sum(s.by_model.values(), TokenUsage())
     for name, price in prices.prices.items():
@@ -90,6 +98,8 @@ def format_summary(s: Summary, projections: list[int] = (300, 600, 1500)) -> str
         f"1件あたり: 平均 ${s.avg_usd:.3f} / 中央値 ${s.percentile(0.5):.3f} / "
         f"90%点 ${s.percentile(0.9):.3f} / 最大 ${max(s.costs) if s.costs else 0:.3f}",
     ]
+    if s.good or s.bad:
+        lines.append(f"評価: 👍 {s.good} 件 / 👎 {s.bad} 件(👍 の割合 {s.good / (s.good + s.bad):.0%})")
     if s.unpriced:
         lines.append(f"※ 単価表にないモデルを含む {s.unpriced} 件は合計から除いています(config/pricing.toml に追加してください)")
 
@@ -122,6 +132,9 @@ def export_csv(store: Store, month: str | None = None) -> str:
     models = defaultdict(list)
     for m in store.model_rows(month):
         models[m["question_id"]].append(m)
+    ratings: dict[int, list] = defaultdict(list)
+    for f in store.feedback_rows(month):
+        ratings[f["question_id"]].append(f)
 
     buf = io.StringIO()
     w = csv.writer(buf)
@@ -129,15 +142,18 @@ def export_csv(store: Store, month: str | None = None) -> str:
         "id", "asked_at_utc", "user_id", "auth_mode", "auth_source", "configured_model", "resumed",
         "num_turns", "duration_ms", "is_error", "subtype", "permission_denials",
         "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens",
-        "virtual_cost_usd", "sdk_cost_usd", "models", "question",
+        "virtual_cost_usd", "sdk_cost_usd", "models", "good", "bad", "bad_reasons", "question", "answer",
     ])
     for r in rows:
         ms = models.get(r["id"], [])
+        fs = ratings.get(r["id"], [])
         w.writerow([
             r["id"], r["asked_at"], r["user_id"], r["auth_mode"], r["auth_source"], r["configured_model"],
             r["resumed"], r["num_turns"], r["duration_ms"], r["is_error"], r["subtype"], r["permission_denials"],
             sum(m["input_tokens"] for m in ms), sum(m["output_tokens"] for m in ms),
             sum(m["cache_write_tokens"] for m in ms), sum(m["cache_read_tokens"] for m in ms),
-            r["virtual_cost_usd"], r["sdk_cost_usd"], " ".join(sorted({m["model"] for m in ms})), r["question"],
+            r["virtual_cost_usd"], r["sdk_cost_usd"], " ".join(sorted({m["model"] for m in ms})),
+            sum(1 for f in fs if f["rating"] > 0), sum(1 for f in fs if f["rating"] < 0),
+            " / ".join(f["reason"] for f in fs if f["rating"] < 0 and f["reason"]), r["question"], r["answer"],
         ])
     return buf.getvalue()

@@ -8,12 +8,12 @@ def test_subscriptionは本人1人なら起動できる(base_env):
     assert s.auth_mode == "subscription"
     assert s.is_slack_user_allowed("UOWNER")
     assert not s.is_slack_user_allowed("UOTHER")
+    assert s.daily_limit_per_user == 20 and s.retention_days == 365 and s.session_retention_days == 30
 
 
 def test_subscriptionはSlack利用者なしでもCLI用に起動できる(base_env):
     base_env["ALLOWED_SLACK_USERS"] = ""
-    s = load_settings(base_env)
-    assert not s.is_slack_user_allowed("UOWNER")
+    assert not load_settings(base_env).is_slack_user_allowed("UOWNER")
 
 
 @pytest.mark.parametrize("users", ["UOWNER,UOTHER", "*"])
@@ -37,8 +37,7 @@ def test_apiはキーがないと起動しない(base_env):
 
 def test_apiは全員に公開できる(base_env):
     base_env.update(AUTH_MODE="api", ANTHROPIC_API_KEY="sk-ant-xxx", ALLOWED_SLACK_USERS="*")
-    s = load_settings(base_env)
-    assert s.is_slack_user_allowed("UANYONE")
+    assert load_settings(base_env).is_slack_user_allowed("UANYONE")
 
 
 def test_認証モードの指定は必須(base_env):
@@ -47,7 +46,14 @@ def test_認証モードの指定は必須(base_env):
         load_settings(base_env)
 
 
-def test_存在しないリポジトリは起動しない(base_env, tmp_path):
-    base_env["REPO_PATH"] = str(tmp_path / "none")
+def test_ミラーがなければ起動しない(base_env, tmp_path):
+    base_env["MIRROR_PATH"] = str(tmp_path / "none.git")
+    with pytest.raises(ConfigError):
+        load_settings(base_env)
+
+
+@pytest.mark.parametrize("key, value", [("DAILY_LIMIT_PER_USER", "abc"), ("TIMEZONE", "Mars/Base")])
+def test_値の誤りは起動前に分かる(base_env, key, value):
+    base_env[key] = value
     with pytest.raises(ConfigError):
         load_settings(base_env)

@@ -1,59 +1,46 @@
-import os
-from pathlib import Path
-
 import pytest
 
-from qa_bot.guard import PathGuard, make_pre_tool_use_hook
+from qa_bot.agent import build_options
+from qa_bot.guard import ALLOWED_TOOLS, is_allowed, make_pre_tool_use_hook
+from qa_bot.repo_tools import _wrap, tool_specs
+from qa_bot.versions import VersionError, VersionRepo
 
 
-@pytest.fixture
-def guard(repo):
-    return PathGuard(repo, (".git/**", "secrets/**"))
+@pytest.mark.parametrize("tool", ["Read", "Bash", "Edit", "Write", "Glob", "Grep", "WebFetch", "Agent",
+                                  "mcp__github__push_files", "mcp__repo__write_file"])
+def test_読み取り専用ツール以外は使えない(tool):
+    assert not is_allowed(tool)
 
 
-def test_リポジトリ内は読める(guard, repo):
-    assert guard.check("Read", {"file_path": str(repo / "README.md")}).allowed
-    assert guard.check("Read", {"file_path": "README.md"}).allowed
-    assert guard.check("Grep", {"pattern": "test"}).allowed
-    assert guard.check("Glob", {"pattern": "**/*.md"}).allowed
+def test_Gitを読む専用ツールは使える():
+    assert {"mcp__repo__read_file", "mcp__repo__grep", "mcp__repo__diff_summary"} <= ALLOWED_TOOLS
 
 
-@pytest.mark.parametrize("path", ["/etc/passwd", "/proc/self/environ", "~/.claude/.credentials.json", "../x", "/"])
-def test_リポジトリ外は読めない(guard, path):
-    assert not guard.check("Read", {"file_path": path}).allowed
-    assert not guard.check("Grep", {"pattern": "x", "path": path}).allowed
-
-
-def test_禁止パスは読めない(guard, repo):
-    assert not guard.check("Read", {"file_path": str(repo / ".git" / "config")}).allowed
-    assert not guard.check("Read", {"file_path": "secrets/key.txt"}).allowed
-    assert not guard.check("Grep", {"pattern": "x", "path": "secrets"}).allowed
-
-
-def test_シンボリックリンクで外に出られない(guard, repo, tmp_path):
-    outside = tmp_path / "outside.txt"
-    outside.write_text("secret")
-    os.symlink(outside, repo / "link.txt")
-    assert not guard.check("Read", {"file_path": str(repo / "link.txt")}).allowed
-
-
-@pytest.mark.parametrize("pattern", ["../**/*", "/etc/*", "~/*"])
-def test_globパターンで外に出られない(guard, pattern):
-    assert not guard.check("Glob", {"pattern": pattern}).allowed
-    assert not guard.check("Grep", {"pattern": "x", "glob": pattern}).allowed
-
-
-def test_Grepの正規表現にドットが含まれていても拒否しない(guard):
-    assert guard.check("Grep", {"pattern": r"\.\./"}).allowed
-
-
-@pytest.mark.parametrize("tool", ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "Agent", "mcp__github__push_files"])
-def test_読み取り以外のツールは使えない(guard, tool, repo):
-    assert not guard.check(tool, {"file_path": str(repo / "README.md"), "command": "ls"}).allowed
-
-
-async def test_フックは拒否をSDKの形式で返す(guard):
-    hook = make_pre_tool_use_hook(guard)
+async def test_フックは拒否をSDKの形式で返す():
+    hook = make_pre_tool_use_hook()
     out = await hook({"tool_name": "Bash", "tool_input": {"command": "git push"}}, "id", None)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert await hook({"tool_name": "Read", "tool_input": {"file_path": "README.md"}}, "id", None) == {}
+    assert await hook({"tool_name": "mcp__repo__read_file", "tool_input": {"path": "README.md"}}, "id", None) == {}
+
+
+def test_ツール定義と許可リストが一致する(mirror):
+    names = {f"mcp__repo__{name}" for name, *_ in tool_specs(VersionRepo(mirror))}
+    assert names == ALLOWED_TOOLS
+
+
+async def test_ツールの誤りはエラーとしてエージェントに返す():
+    def broken(_args):
+        raise VersionError("v9.9.9 は対象のバージョンにありません")
+
+    out = await _wrap(broken)({})
+    assert out["is_error"] and "v9.9.9" in out["content"][0]["text"]
+
+
+def test_組み込みツールを渡さず設定ファイルも読まない(settings, mirror):
+    o = build_options(settings, VersionRepo(mirror), resume_session_id="abc")
+    assert o.tools == []
+    assert set(o.allowed_tools) == ALLOWED_TOOLS
+    assert o.setting_sources == [] and o.permission_mode == "dontAsk"
+    assert "Bash" in o.disallowed_tools and "Read" in o.disallowed_tools
+    assert o.resume == "abc" and o.cwd == str(settings.agent_workdir)
+    assert o.env["SLACK_BOT_TOKEN"] == ""

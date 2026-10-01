@@ -4,13 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hacarus-check-qa-bot"
-version = "0.1.0"
+version = "0.2.0"
 description = "HACARUS Check 2025 リポジトリに読み取り専用で質問できる社内相談ボット"
 requires-python = ">=3.11"
 dependencies = [
     "claude-agent-sdk>=0.2.163",
     "slack_bolt>=1.30",
     "aiohttp>=3.9",
+    # Windows には zoneinfo が使うタイムゾーンのデータがない
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

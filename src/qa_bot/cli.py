@@ -10,19 +10,25 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .agent import ClaudeAgentRunner, FakeAgentRunner
+from .agent import ClaudeAgentRunner, FakeAgentRunner, delete_session
 from .config import CLI_USER_ID, ConfigError, Settings, load_settings
-from .guard import PathGuard
+from .guard import is_allowed
 from .pricing import PriceTable
 from .report import export_csv, format_summary, summarize
-from .service import QAService
+from .service import DailyLimitError, QAService
 from .store import Store
+from .versions import VersionError, VersionRepo
+
+
+def _repo(settings: Settings) -> VersionRepo:
+    return VersionRepo(settings.mirror_path, settings.deny_paths, git=settings.git_path)
 
 
 def _build(settings: Settings, fake: bool) -> QAService:
     prices = PriceTable.load(settings.pricing_path)
-    runner = FakeAgentRunner(settings.model) if fake else ClaudeAgentRunner(settings)
-    return QAService(settings, runner, Store(settings.db_path), prices)
+    runner = FakeAgentRunner(settings.model) if fake else ClaudeAgentRunner(settings, _repo(settings))
+    return QAService(settings, runner, Store(settings.db_path), prices,
+                     session_deleter=lambda sid: delete_session(settings, sid))
 
 
 def _print_answer(result) -> None:
@@ -42,45 +48,64 @@ def _print_answer(result) -> None:
 
 
 def cmd_check(settings: Settings, _args) -> int:
+    repo = _repo(settings)
     print(f"認証モード      : {settings.auth_mode}")
-    print(f"対象リポジトリ  : {settings.repo_path}")
+    print(f"ミラー          : {settings.mirror_path}")
     print(f"モデル          : {settings.model}(effort: {settings.effort or '既定'})")
     print(f"1問の上限       : {settings.max_turns} 往復 / ${settings.max_budget_usd}")
+    print(f"1人1日の上限    : {settings.daily_limit_per_user or 'なし'} 件")
     users = "全員" if settings.allowed_slack_users is None else (", ".join(sorted(settings.allowed_slack_users)) or "なし(CLI のみ)")
     print(f"Slack の利用者  : {users}")
     print(f"Slack 連携      : {'有効' if settings.slack_enabled else '未設定'}")
-    print(f"記録先          : {settings.db_path}")
+    print(f"記録先          : {settings.db_path}(保存 {settings.retention_days} 日、セッション {settings.session_retention_days} 日)")
+
+    ok = True
+    try:
+        vs = repo.versions()
+        print(f"バージョン      : {len(vs)} 個(最新の正式リリース {repo.latest_official().name})")
+    except VersionError as e:
+        print(f"バージョン      : 取得できません({e})", file=sys.stderr)
+        ok = False
 
     prices = PriceTable.load(settings.pricing_path)
     if prices.find(settings.model) is None:
         print(f"警告: {settings.model} の単価が {settings.pricing_path} にありません", file=sys.stderr)
 
     # 読み取り制限が効いているかを、実際に Claude を呼ばずに確かめる
-    guard = PathGuard(settings.repo_path, settings.deny_paths)
-    probes = [
-        ("Read", {"file_path": str(settings.repo_path / "README.md")}, True),
-        ("Read", {"file_path": str(Path.home() / ".claude" / ".credentials.json")}, False),
-        ("Read", {"file_path": "/proc/self/environ"}, False),
-        ("Read", {"file_path": str(settings.repo_path / ".git" / "config")}, False),
-        ("Read", {"file_path": "../"}, False),
-        ("Grep", {"pattern": "TODO"}, True),
-        ("Glob", {"pattern": "../**/*"}, False),
-        ("Bash", {"command": "git push"}, False),
-        ("Edit", {"file_path": str(settings.repo_path / "README.md")}, False),
-    ]
-    ok = True
     print("\nツール制限の確認")
-    for tool, args, expected in probes:
-        d = guard.check(tool, args)
-        mark = "OK" if d.allowed == expected else "NG"
-        ok &= d.allowed == expected
-        print(f"  [{mark}] {tool} {next(iter(args.values()))} → {'許可' if d.allowed else '拒否'}")
+    for tool, expected in [("mcp__repo__read_file", True), ("mcp__repo__grep", True),
+                           ("Read", False), ("Bash", False), ("Edit", False), ("WebFetch", False)]:
+        mark = "OK" if is_allowed(tool) == expected else "NG"
+        ok &= is_allowed(tool) == expected
+        print(f"  [{mark}] {tool} → {'許可' if is_allowed(tool) else '拒否'}")
+    for path in ["../secret.txt", "/etc/passwd", "C:/Windows/win.ini", ".git/config", ":(top)x"]:
+        try:
+            repo.read_file(None, path)
+            print(f"  [NG] read_file {path} → 読めてしまいました")
+            ok = False
+        except VersionError:
+            print(f"  [OK] read_file {path} → 拒否")
     return 0 if ok else 1
+
+
+def cmd_versions(settings: Settings, _args) -> int:
+    print(_repo(settings).list_versions_text())
+    return 0
+
+
+def cmd_purge(settings: Settings, _args) -> int:
+    n = _build(settings, fake=True).purge()
+    print(f"保存期間を過ぎた記録を消しました(会話セッション {n} 件)")
+    return 0
 
 
 async def _ask(settings: Settings, args) -> int:
     service = _build(settings, args.fake)
-    result = await service.ask(CLI_USER_ID, args.question, thread_key=args.thread)
+    try:
+        result = await service.ask(CLI_USER_ID, args.question, thread_key=args.thread)
+    except DailyLimitError as e:
+        print(f"今日の上限({e.limit} 件)に達しました", file=sys.stderr)
+        return 1
     _print_answer(result)
     return 1 if result.answer.is_error else 0
 
@@ -151,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("check", help="設定とツール制限を確認する(Claude は呼ばない)")
+    sub.add_parser("versions", help="質問に使えるバージョンの一覧を表示する")
+    sub.add_parser("purge", help="保存期間を過ぎた記録と会話セッションを消す")
 
     p = sub.add_parser("ask", help="1つ質問する")
     p.add_argument("question")
@@ -184,6 +211,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "check":
         return cmd_check(settings, args)
+    if args.cmd == "versions":
+        return cmd_versions(settings, args)
+    if args.cmd == "purge":
+        return cmd_purge(settings, args)
     if args.cmd == "ask":
         return asyncio.run(_ask(settings, args))
     if args.cmd == "chat":

@@ -28,37 +28,42 @@ def test_SDKのmodelUsageを読み取る():
     assert usage["claude-sonnet-5-5"] == TokenUsage(input=10, output=20, cache_write=40, cache_read=30)
 
 
-def _record(user: str, cost: float | None, model: str = "claude-sonnet-5-5") -> QuestionRecord:
+def record(user: str, cost: float | None, model: str = "claude-sonnet-5-5", **kw) -> QuestionRecord:
     u = TokenUsage(1000, 2000, 3000, 4000)
-    return QuestionRecord(
-        user_id=user, channel=None, thread_key=None, question="質問", answer_chars=10, is_error=False,
+    base = dict(
+        user_id=user, channel=None, thread_key=None, question="質問", answer="回答", answer_chars=2, is_error=False,
         subtype="success", num_turns=3, duration_ms=100, auth_mode="subscription", auth_source="none",
         configured_model=model, session_id="s", resumed=False, permission_denials=0, sdk_cost_usd=cost,
         virtual_cost_usd=cost, model_usage={model: (u, cost)},
     )
+    base.update(kw)
+    return QuestionRecord(**base)
 
 
-def test_集計と見込み(prices, tmp_path):
+def test_集計と見込みと評価(prices, tmp_path):
     store = Store(tmp_path / "db.sqlite3")
-    store.add_question(_record("A", 0.10))
-    store.add_question(_record("A", 0.30))
-    store.add_question(_record("B", None, model="unknown"))
+    q1 = store.add_question(record("A", 0.10))
+    q2 = store.add_question(record("A", 0.30))
+    store.add_question(record("B", None, model="unknown"))
+    store.set_feedback(q1, "A", 1)
+    store.set_feedback(q2, "A", -1, "バージョンが違う")
 
     s = summarize(store, prices)
-    assert s.count == 3
-    assert s.unpriced == 1
+    assert s.count == 3 and s.unpriced == 1
     assert s.total_usd == pytest.approx(0.40)
     assert s.avg_usd == pytest.approx(0.20)
     assert s.by_model["claude-sonnet-5-5"] == TokenUsage(2000, 4000, 6000, 8000)
     assert s.what_if["claude-haiku-4-5"] < s.what_if["claude-opus-5-5"]
+    assert (s.good, s.bad) == (1, 1)
 
     text = format_summary(s, [100])
     assert "100 件/月: $20.00" in text
+    assert "👍 の割合 50%" in text
     assert "単価表にないモデル" in text
 
-    csv_text = export_csv(store)
-    assert csv_text.splitlines()[0].startswith("id,asked_at_utc")
-    assert len(csv_text.strip().splitlines()) == 4
+    lines = export_csv(store).strip().splitlines()
+    assert lines[0].startswith("id,asked_at_utc") and len(lines) == 4
+    assert "バージョンが違う" in lines[2]
 
 
 def test_記録がなければその旨を表示する(prices, tmp_path):

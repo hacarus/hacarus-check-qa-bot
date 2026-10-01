@@ -1,13 +1,16 @@
-"""Claude Agent SDK を読み取り専用の設定で呼び出す"""
+"""Claude Agent SDK を、Git を読む専用ツールだけを持たせて呼び出す"""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .config import Settings
-from .guard import DISALLOWED_TOOLS, READ_ONLY_TOOLS, PathGuard, make_pre_tool_use_hook
+from .guard import ALLOWED_TOOLS, DISALLOWED_TOOLS, SERVER_NAME, make_pre_tool_use_hook
 from .pricing import TokenUsage
+from .repo_tools import build_server
+from .versions import VersionRepo
 
 
 @dataclass
@@ -28,35 +31,45 @@ class AgentRunner(Protocol):
     async def ask(self, question: str, resume_session_id: str | None = None) -> AgentAnswer: ...
 
 
-def build_options(settings: Settings, resume_session_id: str | None = None):
+def build_system_prompt(settings: Settings) -> str:
+    prompt = settings.system_prompt_path.read_text(encoding="utf-8")
+    if settings.faq_path.exists():
+        # 書き方の説明などの HTML コメントは除く
+        faq = re.sub(r"<!--.*?-->", "", settings.faq_path.read_text(encoding="utf-8"), flags=re.S).strip()
+        if faq:
+            prompt += "\n\n## よくある質問(管理者がまとめたもの。ここで答えられる質問はリポジトリを調べなくてよい)\n\n" + faq
+    return prompt
+
+
+def build_options(settings: Settings, repo: VersionRepo, resume_session_id: str | None = None):
     from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
-    guard = PathGuard(settings.repo_path, settings.deny_paths)
-    system_prompt = settings.system_prompt_path.read_text(encoding="utf-8")
-
+    settings.agent_workdir.mkdir(parents=True, exist_ok=True)
     env = {
         # エージェントの子プロセスに Slack のトークンを渡さない
         "SLACK_BOT_TOKEN": "",
         "SLACK_APP_TOKEN": "",
-        "CLAUDE_AGENT_SDK_CLIENT_APP": "hacarus-check-qa-bot/0.1.0",
+        "CLAUDE_AGENT_SDK_CLIENT_APP": "hacarus-check-qa-bot/0.2.0",
     }
     if settings.auth_mode == "api":
         # API キーが優先されるが、使用枠のトークンが紛れ込んでいても使われないよう空にする
         env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
 
     kwargs: dict[str, Any] = dict(
-        cwd=str(settings.repo_path),
+        cwd=str(settings.agent_workdir),
         model=settings.model,
-        system_prompt=system_prompt,
-        tools=sorted(READ_ONLY_TOOLS),
-        allowed_tools=sorted(READ_ONLY_TOOLS),
+        system_prompt=build_system_prompt(settings),
+        # 組み込みツールは1つも渡さず、Git を読む専用ツールだけを使わせる
+        tools=[],
+        mcp_servers={SERVER_NAME: build_server(repo)},
+        allowed_tools=sorted(ALLOWED_TOOLS),
         disallowed_tools=list(DISALLOWED_TOOLS),
         permission_mode="dontAsk",
-        # リポジトリの .claude/ や CLAUDE.md、~/.claude の設定(hooks を含む)を読み込まない
+        # ~/.claude などの設定(hooks を含む)を読み込まない
         setting_sources=[],
         skills=[],
         strict_mcp_config=True,
-        hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[make_pre_tool_use_hook(guard)])]},
+        hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[make_pre_tool_use_hook()])]},
         max_turns=settings.max_turns,
         env=env,
     )
@@ -92,13 +105,14 @@ def parse_usage(usage: dict[str, Any] | None) -> TokenUsage:
 
 
 class ClaudeAgentRunner:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, repo: VersionRepo):
         self.settings = settings
+        self.repo = repo
 
     async def ask(self, question: str, resume_session_id: str | None = None) -> AgentAnswer:
         from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock, query
 
-        options = build_options(self.settings, resume_session_id)
+        options = build_options(self.settings, self.repo, resume_session_id)
         texts: list[str] = []
         auth_source: str | None = None
         result: ResultMessage | None = None
@@ -154,3 +168,13 @@ class FakeAgentRunner:
             model_usage={self.model: TokenUsage(input=1_000, output=8_000, cache_write=45_000, cache_read=255_000)},
             auth_source="fake",
         )
+
+
+def delete_session(settings: Settings, session_id: str) -> None:
+    """会話のセッション記録(Claude Code が残す JSONL)を消す"""
+    from claude_agent_sdk import delete_session as sdk_delete_session
+
+    try:
+        sdk_delete_session(session_id, directory=str(settings.agent_workdir))
+    except FileNotFoundError:
+        pass

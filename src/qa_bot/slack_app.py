@@ -1,33 +1,71 @@
-"""Slack(Socket Mode)の受け口。処理本体は SlackHandlers に分け、Slack なしでもテストできるようにする"""
+"""Slack の受け口(AI アプリのパネル、チャンネルでのメンション、評価ボタン、/qa-cost)
+
+処理の本体は SlackHandlers に分け、Slack に接続しなくてもテストできるようにしている。
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from .config import Settings
 from .pricing import PriceTable
 from .report import format_summary, summarize
-from .service import NotAllowedError, QAService
+from .service import DailyLimitError, NotAllowedError, QAService, ServiceAnswer
 
 log = logging.getLogger(__name__)
 
 MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
-# Slack の1メッセージに収まるよう分割する長さ
-CHUNK = 3500
+# Slack の section ブロック1つに入る文字数の上限(3000)に余裕を持たせる
+SECTION_CHARS = 2900
+MAX_SECTIONS = 40
 
 NOT_ALLOWED_MESSAGE = "このボットは試験運用中のため、利用できるメンバーを限定しています。"
-THINKING_MESSAGE = ":mag: リポジトリを調べています…"
+THINKING_STATUS = "リポジトリを調べています…"
+LOADING_MESSAGES = ["ファイルを探しています…", "コードを読んでいます…", "回答をまとめています…"]
+GREETING = (
+    "HACARUS Check 2025 のリポジトリについて質問できます。\n"
+    "バージョンを指定するときは「v3.2.1 で…」のように書いてください。指定がなければ最新の正式リリースをもとに答えます。"
+)
+SUGGESTED_PROMPTS = [
+    {"title": "最新版の機能を確認する", "message": "最新の正式リリースで、検査結果を CSV で出力できますか？"},
+    {"title": "バージョン間の違いを調べる", "message": "v3.2.1 から v3.3.2 に上げるとき、設定やデータの移行は必要ですか？"},
+    {"title": "リリース内容を確認する", "message": "v3.3.2 で何が変わりましたか？"},
+]
+
+ACTION_GOOD = "qa_good"
+ACTION_BAD = "qa_bad"
+VIEW_BAD_REASON = "qa_bad_reason"
 
 
 def strip_mention(text: str) -> str:
     return MENTION_RE.sub("", text or "").strip()
 
 
-def split_text(text: str, size: int = CHUNK) -> list[str]:
-    if len(text) <= size:
-        return [text]
+def to_mrkdwn(text: str) -> str:
+    """Claude が書く Markdown を、Slack の mrkdwn に寄せる"""
+    out: list[str] = []
+    in_code = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            out.append("```")
+            continue
+        if in_code:
+            out.append(line)
+            continue
+        line = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", line)
+        line = re.sub(r"\*\*(.+?)\*\*", r"*\1*", line)
+        line = re.sub(r"__(.+?)__", r"*\1*", line)
+        line = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"<\2|\1>", line)
+        line = re.sub(r"^(\s*)[-*]\s+", r"\1• ", line)
+        out.append(line)
+    return "\n".join(out)
+
+
+def split_text(text: str, size: int = SECTION_CHARS) -> list[str]:
     chunks: list[str] = []
     rest = text
     while len(rest) > size:
@@ -38,7 +76,46 @@ def split_text(text: str, size: int = CHUNK) -> list[str]:
         rest = rest[cut:].lstrip("\n")
     if rest:
         chunks.append(rest)
-    return chunks
+    return chunks or [""]
+
+
+def answer_blocks(text: str, footer: str | None, question_id: int | None) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
+        for chunk in split_text(to_mrkdwn(text))[:MAX_SECTIONS]
+    ]
+    if footer:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
+    if question_id is not None:
+        blocks.append({
+            "type": "actions",
+            "block_id": f"feedback-{question_id}",
+            "elements": [
+                {"type": "button", "action_id": ACTION_GOOD, "value": str(question_id),
+                 "text": {"type": "plain_text", "text": "👍 役に立った"}},
+                {"type": "button", "action_id": ACTION_BAD, "value": str(question_id),
+                 "text": {"type": "plain_text", "text": "👎 違う・足りない"}},
+            ],
+        })
+    return blocks
+
+
+def bad_reason_view(question_id: int) -> dict[str, Any]:
+    return {
+        "type": "modal",
+        "callback_id": VIEW_BAD_REASON,
+        "private_metadata": str(question_id),
+        "title": {"type": "plain_text", "text": "評価ありがとうございます"},
+        "submit": {"type": "plain_text", "text": "送る"},
+        "close": {"type": "plain_text", "text": "送らずに閉じる"},
+        "blocks": [{
+            "type": "input",
+            "block_id": "reason",
+            "optional": True,
+            "label": {"type": "plain_text", "text": "どこが違った・足りなかったか(任意)"},
+            "element": {"type": "plain_text_input", "action_id": "text", "multiline": True, "max_length": 500},
+        }],
+    }
 
 
 class SlackHandlers:
@@ -47,7 +124,68 @@ class SlackHandlers:
         self.service = service
         self.prices = prices
 
-    async def handle_question(self, event: dict[str, Any], client: Any) -> None:
+    # ----- 回答を作る共通部分 -----
+
+    def _footer(self, result: ServiceAnswer) -> str | None:
+        if not self.settings.show_cost_footer:
+            return None
+        cost = "不明" if result.virtual_cost_usd is None else f"${result.virtual_cost_usd:.3f}"
+        return f"{result.answer.num_turns} 往復 / 仮想料金 {cost} / {self.settings.auth_mode}"
+
+    async def _answer(self, user: str, question: str, thread_key: str, channel: str) -> tuple[str, list | None]:
+        """利用者に返すテキストと Block Kit のブロックを作る"""
+        try:
+            result = await self.service.ask(user, question, thread_key=thread_key, channel=channel)
+        except NotAllowedError:
+            return NOT_ALLOWED_MESSAGE, None
+        except DailyLimitError as e:
+            return f"今日の質問の上限({e.limit} 件)に達しました。明日また質問してください。", None
+        except Exception:
+            log.exception("質問の処理に失敗しました")
+            return ":warning: 回答の生成に失敗しました。時間をおいてもう一度試してください。", None
+
+        text = result.answer.text or "(回答が空でした)"
+        if result.answer.is_error:
+            text = f":warning: {text}"
+        return text[:3000], answer_blocks(text, self._footer(result), result.question_id)
+
+    # ----- AI アプリのパネル -----
+
+    async def thread_started(self, say: Callable[..., Awaitable[Any]], set_suggested_prompts: Callable[..., Awaitable[Any]]) -> None:
+        await say(GREETING)
+        await set_suggested_prompts(prompts=SUGGESTED_PROMPTS)
+
+    async def assistant_message(
+        self,
+        payload: dict[str, Any],
+        say: Callable[..., Awaitable[Any]],
+        set_status: Callable[..., Awaitable[Any]],
+        set_title: Callable[..., Awaitable[Any]],
+    ) -> None:
+        user = payload.get("user", "")
+        question = (payload.get("text") or "").strip()
+        channel = payload["channel"]
+        thread_ts = payload.get("thread_ts") or payload["ts"]
+        if not self.service.is_allowed(user):
+            await say(NOT_ALLOWED_MESSAGE)
+            return
+        if not question:
+            await say("質問を書いてください。")
+            return
+        thread_key = f"{channel}:{thread_ts}"
+        if self.service.store.get_session(thread_key) is None:
+            # 会話の一覧で見分けやすいよう、最初の質問をタイトルにする
+            await set_title(question[:60])
+        await set_status(THINKING_STATUS, loading_messages=LOADING_MESSAGES)
+        text, blocks = await self._answer(user, question, thread_key, channel)
+        if blocks:
+            await say(text=text, blocks=blocks)
+        else:
+            await say(text)
+
+    # ----- チャンネルでのメンション -----
+
+    async def handle_mention(self, event: dict[str, Any], client: Any) -> None:
         if event.get("bot_id") or event.get("subtype"):
             return
         user = event.get("user", "")
@@ -62,25 +200,38 @@ class SlackHandlers:
             await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text="質問を書いてください。")
             return
 
-        placeholder = await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=THINKING_MESSAGE)
-        try:
-            result = await self.service.ask(user, question, thread_key=f"{channel}:{thread_ts}", channel=channel)
-            text = result.answer.text or "(回答が空でした)"
-            if result.answer.is_error:
-                text = f":warning: {text}"
-            if self.settings.show_cost_footer:
-                cost = "不明" if result.virtual_cost_usd is None else f"${result.virtual_cost_usd:.3f}"
-                text += f"\n\n_{result.answer.num_turns} 往復 / 仮想料金 {cost} / {self.settings.auth_mode}_"
-        except NotAllowedError:
-            text = NOT_ALLOWED_MESSAGE
-        except Exception:
-            log.exception("質問の処理に失敗しました")
-            text = ":warning: 回答の生成に失敗しました。時間をおいてもう一度試してください。"
+        placeholder = await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=":mag: " + THINKING_STATUS)
+        text, blocks = await self._answer(user, question, f"{channel}:{thread_ts}", channel)
+        await client.chat_update(channel=channel, ts=placeholder["ts"], text=text, blocks=blocks or [])
 
-        chunks = split_text(text)
-        await client.chat_update(channel=channel, ts=placeholder["ts"], text=chunks[0])
-        for chunk in chunks[1:]:
-            await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=chunk)
+    # ----- 評価 -----
+
+    async def handle_feedback(self, body: dict[str, Any], client: Any) -> None:
+        action = body["actions"][0]
+        user = body["user"]["id"]
+        if not self.service.is_allowed(user):
+            return
+        qid = int(action["value"])
+        good = action["action_id"] == ACTION_GOOD
+        self.service.rate(qid, user, 1 if good else -1)
+        if not good:
+            await client.views_open(trigger_id=body["trigger_id"], view=bad_reason_view(qid))
+
+        # 押したことが分かるよう、ボタンを評価の結果に置き換える
+        message = body.get("message") or {}
+        blocks = [b for b in message.get("blocks", []) if b.get("block_id") != f"feedback-{qid}"]
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "👍 評価ありがとうございます" if good
+                                                         else "👎 評価ありがとうございます。改善に使います"}]})
+        await client.chat_update(channel=body["channel"]["id"], ts=message.get("ts"),
+                                 text=message.get("text", ""), blocks=blocks)
+
+    async def handle_bad_reason(self, body: dict[str, Any]) -> None:
+        view = body["view"]
+        reason = (((view.get("state") or {}).get("values") or {}).get("reason") or {}).get("text", {}).get("value")
+        if reason and reason.strip():
+            self.service.store.set_feedback_reason(int(view["private_metadata"]), body["user"]["id"], reason.strip())
+
+    # ----- 管理者向け -----
 
     async def handle_cost_command(self, command: dict[str, Any]) -> str:
         if not self.settings.is_admin(command.get("user_id", "")):
@@ -90,20 +241,42 @@ class SlackHandlers:
 
 
 def build_app(settings: Settings, service: QAService, prices: PriceTable):
-    from slack_bolt.async_app import AsyncApp
+    from slack_bolt.async_app import AsyncApp, AsyncAssistant
 
     app = AsyncApp(token=settings.slack_bot_token)
     handlers = SlackHandlers(settings, service, prices)
+    assistant = AsyncAssistant()
+
+    @assistant.thread_started
+    async def on_thread_started(say, set_suggested_prompts):
+        await handlers.thread_started(say, set_suggested_prompts)
+
+    @assistant.user_message
+    async def on_user_message(payload, say, set_status, set_title):
+        await handlers.assistant_message(payload, say, set_status, set_title)
+
+    app.use(assistant)
 
     @app.event("app_mention")
     async def on_mention(event, client):
-        await handlers.handle_question(event, client)
+        await handlers.handle_mention(event, client)
 
     @app.event("message")
     async def on_message(event, client):
-        # DM だけに反応する。チャンネルではメンションされたときだけ答える
+        # AI アプリのパネル以外の DM(メッセージタブ)にも答える
         if event.get("channel_type") == "im":
-            await handlers.handle_question(event, client)
+            await handlers.handle_mention(event, client)
+
+    @app.action(ACTION_GOOD)
+    @app.action(ACTION_BAD)
+    async def on_feedback(ack, body, client):
+        await ack()
+        await handlers.handle_feedback(body, client)
+
+    @app.view(VIEW_BAD_REASON)
+    async def on_bad_reason(ack, body):
+        await ack()
+        await handlers.handle_bad_reason(body)
 
     @app.command("/qa-cost")
     async def on_cost(ack, command, respond):
@@ -113,8 +286,22 @@ def build_app(settings: Settings, service: QAService, prices: PriceTable):
     return app
 
 
+async def _purge_daily(service: QAService) -> None:
+    while True:
+        try:
+            n = service.purge()
+            log.info("保存期間を過ぎた記録を整理しました(セッション %d 件)", n)
+        except Exception:
+            log.exception("記録の整理に失敗しました")
+        await asyncio.sleep(24 * 60 * 60)
+
+
 async def run_socket_mode(settings: Settings, service: QAService, prices: PriceTable) -> None:
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
     app = build_app(settings, service, prices)
-    await AsyncSocketModeHandler(app, settings.slack_app_token).start_async()
+    purge_task = asyncio.create_task(_purge_daily(service))
+    try:
+        await AsyncSocketModeHandler(app, settings.slack_app_token).start_async()
+    finally:
+        purge_task.cancel()

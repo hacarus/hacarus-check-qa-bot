@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Mapping
+from zoneinfo import ZoneInfo
 
 AuthMode = Literal["subscription", "api"]
 
@@ -22,22 +23,37 @@ class ConfigError(Exception):
 @dataclass(frozen=True)
 class Settings:
     auth_mode: AuthMode
-    repo_path: Path
+    mirror_path: Path
     model: str
     effort: str | None
     max_turns: int
     max_budget_usd: float | None
     max_concurrency: int
-    db_path: Path
+    daily_limit_per_user: int
+    timezone: ZoneInfo
+    data_dir: Path
     pricing_path: Path
     system_prompt_path: Path
+    faq_path: Path
     deny_paths: tuple[str, ...]
     allowed_slack_users: frozenset[str] | None  # None は全員を許可
     admin_slack_users: frozenset[str]
+    retention_days: int = 365
+    session_retention_days: int = 30
+    git_path: str = "git"
     slack_bot_token: str | None = field(default=None, repr=False)
     slack_app_token: str | None = field(default=None, repr=False)
     show_cost_footer: bool = True
     log_question_text: bool = True
+
+    @property
+    def db_path(self) -> Path:
+        return self.data_dir / "qa_bot.sqlite3"
+
+    @property
+    def agent_workdir(self) -> Path:
+        """エージェントの作業ディレクトリ。中身は空で、会話のセッション記録の置き場所を分けるためだけに使う"""
+        return self.data_dir / "agent_workdir"
 
     @property
     def slack_enabled(self) -> bool:
@@ -64,9 +80,17 @@ def _bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _path(value: str | None, default: Path) -> Path:
-    p = Path(value) if value else default
+def _path(value: str | None, default: str) -> Path:
+    p = Path(value or default).expanduser()
     return p if p.is_absolute() else (PROJECT_ROOT / p)
+
+
+def _int(env: Mapping[str, str], key: str, default: int) -> int:
+    raw = env.get(key, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        raise ConfigError(f"{key} には整数を指定してください") from None
 
 
 def load_dotenv(path: Path) -> dict[str, str]:
@@ -74,7 +98,7 @@ def load_dotenv(path: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     if not path.exists():
         return result
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -92,12 +116,12 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if auth_mode not in ("subscription", "api"):
         raise ConfigError("AUTH_MODE には subscription か api を指定してください")
 
-    repo = env.get("REPO_PATH", "").strip()
-    if not repo:
-        raise ConfigError("REPO_PATH に質問対象のリポジトリのパスを指定してください")
-    repo_path = _path(str(Path(repo).expanduser()), Path(".")).resolve()
-    if not repo_path.is_dir():
-        raise ConfigError(f"REPO_PATH が存在しません: {repo_path}")
+    mirror = _path(env.get("MIRROR_PATH"), "data/mirror.git").resolve()
+    if not (mirror / "HEAD").is_file() or not (mirror / "objects").is_dir():
+        raise ConfigError(
+            f"MIRROR_PATH に Git のミラー(bare リポジトリ)がありません: {mirror}\n"
+            "scripts/sync_repo.ps1(Windows)か scripts/sync_repo.sh で作成してください"
+        )
 
     allowed_raw = _split(env.get("ALLOWED_SLACK_USERS"))
     allowed: frozenset[str] | None
@@ -123,27 +147,35 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
                 "AUTH_MODE=subscription なのに ANTHROPIC_API_KEY が設定されています。"
                 "API キーが優先されて従量課金になるため、どちらかに揃えてください"
             )
-    else:
-        if not has_api_key:
-            raise ConfigError("AUTH_MODE=api では ANTHROPIC_API_KEY を設定してください")
+    elif not has_api_key:
+        raise ConfigError("AUTH_MODE=api では ANTHROPIC_API_KEY を設定してください")
 
     budget_raw = env.get("MAX_BUDGET_USD", "2.0").strip()
-    max_budget = float(budget_raw) if budget_raw else None
+    try:
+        timezone = ZoneInfo(env.get("TIMEZONE", "Asia/Tokyo").strip() or "Asia/Tokyo")
+    except Exception:
+        raise ConfigError("TIMEZONE には Asia/Tokyo のようなタイムゾーン名を指定してください") from None
 
     return Settings(
         auth_mode=auth_mode,  # type: ignore[arg-type]
-        repo_path=repo_path,
+        mirror_path=mirror,
         model=env.get("MODEL", "claude-sonnet-5-5").strip(),
         effort=env.get("EFFORT", "").strip() or None,
-        max_turns=int(env.get("MAX_TURNS", "30")),
-        max_budget_usd=max_budget,
-        max_concurrency=max(1, int(env.get("MAX_CONCURRENCY", "2"))),
-        db_path=_path(env.get("DB_PATH"), Path("data/qa_bot.sqlite3")),
-        pricing_path=_path(env.get("PRICING_PATH"), Path("config/pricing.toml")),
-        system_prompt_path=_path(env.get("SYSTEM_PROMPT_PATH"), Path("config/system_prompt.md")),
+        max_turns=_int(env, "MAX_TURNS", 30),
+        max_budget_usd=float(budget_raw) if budget_raw else None,
+        max_concurrency=max(1, _int(env, "MAX_CONCURRENCY", 2)),
+        daily_limit_per_user=_int(env, "DAILY_LIMIT_PER_USER", 20),
+        timezone=timezone,
+        data_dir=_path(env.get("DATA_DIR"), "data"),
+        pricing_path=_path(env.get("PRICING_PATH"), "config/pricing.toml"),
+        system_prompt_path=_path(env.get("SYSTEM_PROMPT_PATH"), "config/system_prompt.md"),
+        faq_path=_path(env.get("FAQ_PATH"), "knowledge/faq.md"),
         deny_paths=tuple(_split(env.get("DENY_PATHS", ".git/**"))),
         allowed_slack_users=allowed,
         admin_slack_users=frozenset(_split(env.get("ADMIN_SLACK_USERS"))),
+        retention_days=_int(env, "RETENTION_DAYS", 365),
+        session_retention_days=_int(env, "SESSION_RETENTION_DAYS", 30),
+        git_path=env.get("GIT_PATH", "git").strip() or "git",
         slack_bot_token=env.get("SLACK_BOT_TOKEN", "").strip() or None,
         slack_app_token=env.get("SLACK_APP_TOKEN", "").strip() or None,
         show_cost_footer=_bool(env.get("SHOW_COST_FOOTER"), True),
