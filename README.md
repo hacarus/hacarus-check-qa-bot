@@ -2,7 +2,7 @@
 
 営業や技術サポートのメンバーが、HACARUS Check 2025 のリポジトリについて Slack で質問できるボットです。
 回答には Claude Agent SDK(Claude Code と同じエージェント)を使い、リポジトリは読むことしかできないようにしています。
-設計の背景や判断は設計書(HACARUS Check リポジトリ相談ボット 設計書)にまとめています。
+設計の背景や判断は [docs/design.md](docs/design.md) に、Slack アプリの仕組みと権限は [docs/slack-app.md](docs/slack-app.md) にまとめています。
 
 ## できること
 
