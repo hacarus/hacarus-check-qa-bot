@@ -26,6 +26,12 @@ oauth_config:
       - app_mentions:read
       - chat:write
       - im:history
+      # メンションされたときに、そのスレッドやチャンネルの直前の発言を読む(質問の背景を知るため)
+      - channels:history
+      - groups:history
+      # チャンネルが社外と共有されていないかを確かめる
+      - channels:read
+      - groups:read
       - commands
 settings:
   event_subscriptions:

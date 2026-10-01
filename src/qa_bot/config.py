@@ -44,7 +44,9 @@ class Settings:
     claude_cli_path: str | None = None
     slack_bot_token: str | None = field(default=None, repr=False)
     slack_app_token: str | None = field(default=None, repr=False)
-    show_cost_footer: bool = True
+    cost_footer: str = "dm"  # always / dm / never
+    allowed_channels: frozenset[str] | None = None  # None はボットを招待したすべてのチャンネル
+    thread_context_messages: int = 20
     log_question_text: bool = True
 
     @property
@@ -92,6 +94,16 @@ def _int(env: Mapping[str, str], key: str, default: int) -> int:
         return int(raw) if raw else default
     except ValueError:
         raise ConfigError(f"{key} には整数を指定してください") from None
+
+
+def _cost_footer(env: Mapping[str, str]) -> str:
+    value = env.get("COST_FOOTER", "").strip().lower()
+    if not value:
+        # 以前の設定名(SHOW_COST_FOOTER=false)も受け付ける
+        return "dm" if _bool(env.get("SHOW_COST_FOOTER"), True) else "never"
+    if value not in ("always", "dm", "never"):
+        raise ConfigError("COST_FOOTER には always / dm / never のどれかを指定してください")
+    return value
 
 
 def load_dotenv(path: Path) -> dict[str, str]:
@@ -180,6 +192,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         claude_cli_path=env.get("CLAUDE_CLI_PATH", "").strip() or None,
         slack_bot_token=env.get("SLACK_BOT_TOKEN", "").strip() or None,
         slack_app_token=env.get("SLACK_APP_TOKEN", "").strip() or None,
-        show_cost_footer=_bool(env.get("SHOW_COST_FOOTER"), True),
+        cost_footer=_cost_footer(env),
+        allowed_channels=frozenset(_split(env.get("ALLOWED_CHANNELS"))) or None,
+        thread_context_messages=_int(env, "THREAD_CONTEXT_MESSAGES", 20),
         log_question_text=_bool(env.get("LOG_QUESTION_TEXT"), True),
     )

@@ -110,6 +110,9 @@ task register USER=qa-bot SSH_KEY=C:\qa-bot\keys\deploy_key
 | `MODEL` | `claude-sonnet-5-5` | 使うモデル |
 | `MAX_TURNS` / `MAX_BUDGET_USD` | `30` / `2.0` | 1つの質問で許す往復回数と料金の上限 |
 | `DAILY_LIMIT_PER_USER` | `20` | 1人が1日に質問できる件数 |
+| `ALLOWED_CHANNELS` | 空欄 | メンションで答えるチャンネル(空欄なら招待したすべて。社外と共有したチャンネルでは答えない) |
+| `THREAD_CONTEXT_MESSAGES` | `20` | メンションされたときに文脈として読む直前の発言の数 |
+| `COST_FOOTER` | `dm` | 往復回数と仮想料金を表示する場所(`always` / `dm` / `never`) |
 | `RETENTION_DAYS` / `SESSION_RETENTION_DAYS` | `365` / `30` | 記録と会話セッションの保存日数 |
 | `DENY_PATHS` | `.git/**` | 参照を禁止するパス |
 

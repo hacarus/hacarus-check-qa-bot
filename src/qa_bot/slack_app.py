@@ -23,6 +23,14 @@ SECTION_CHARS = 2900
 MAX_SECTIONS = 40
 
 NOT_ALLOWED_MESSAGE = "このボットは試験運用中のため、利用できるメンバーを限定しています。"
+EXTERNAL_CHANNEL_MESSAGE = (
+    "社外の方が参加しているチャンネルでは、社内向けの情報を含むためお答えできません。"
+    "DM か AI アプリのパネルで質問してください。"
+)
+CHANNEL_NOT_ALLOWED_MESSAGE = "このチャンネルではお答えできません。DM か AI アプリのパネルで質問してください。"
+# 文脈として読む、質問より前の発言の範囲(スレッドの外でメンションされたとき)
+CONTEXT_WINDOW_SECONDS = 60 * 60
+CONTEXT_MAX_CHARS = 6000
 THINKING_STATUS = "リポジトリを調べています…"
 LOADING_MESSAGES = ["ファイルを探しています…", "コードを読んでいます…", "回答をまとめています…"]
 GREETING = (
@@ -126,16 +134,18 @@ class SlackHandlers:
 
     # ----- 回答を作る共通部分 -----
 
-    def _footer(self, result: ServiceAnswer) -> str | None:
-        if not self.settings.show_cost_footer:
+    def _footer(self, result: ServiceAnswer, in_channel: bool) -> str | None:
+        mode = self.settings.cost_footer
+        if mode == "never" or (mode == "dm" and in_channel):
             return None
         cost = "不明" if result.virtual_cost_usd is None else f"${result.virtual_cost_usd:.3f}"
         return f"{result.answer.num_turns} 往復 / 仮想料金 {cost} / {self.settings.auth_mode}"
 
-    async def _answer(self, user: str, question: str, thread_key: str, channel: str) -> tuple[str, list | None]:
+    async def _answer(self, user: str, question: str, thread_key: str, channel: str,
+                      in_channel: bool = False, context: str | None = None) -> tuple[str, list | None]:
         """利用者に返すテキストと Block Kit のブロックを作る"""
         try:
-            result = await self.service.ask(user, question, thread_key=thread_key, channel=channel)
+            result = await self.service.ask(user, question, thread_key=thread_key, channel=channel, context=context)
         except NotAllowedError:
             return NOT_ALLOWED_MESSAGE, None
         except DailyLimitError as e:
@@ -147,7 +157,7 @@ class SlackHandlers:
         text = result.answer.text or "(回答が空でした)"
         if result.answer.is_error:
             text = f":warning: {text}"
-        return text[:3000], answer_blocks(text, self._footer(result), result.question_id)
+        return text[:3000], answer_blocks(text, self._footer(result, in_channel), result.question_id)
 
     # ----- AI アプリのパネル -----
 
@@ -185,24 +195,73 @@ class SlackHandlers:
 
     # ----- チャンネルでのメンション -----
 
-    async def handle_mention(self, event: dict[str, Any], client: Any) -> None:
+    async def handle_mention(self, event: dict[str, Any], client: Any, body: dict[str, Any] | None = None) -> None:
         if event.get("bot_id") or event.get("subtype"):
             return
         user = event.get("user", "")
         channel = event["channel"]
         thread_ts = event.get("thread_ts") or event["ts"]
         question = strip_mention(event.get("text", ""))
+        in_channel = event.get("channel_type") != "im"
 
+        async def reply(text: str) -> None:
+            await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
+
+        if in_channel:
+            # Slack コネクトなどで社外とつながったチャンネルでは答えない
+            if (body or {}).get("is_ext_shared_channel") or await self._is_shared_with_outside(client, channel):
+                await reply(EXTERNAL_CHANNEL_MESSAGE)
+                return
+            allowed = self.settings.allowed_channels
+            if allowed is not None and channel not in allowed:
+                await reply(CHANNEL_NOT_ALLOWED_MESSAGE)
+                return
         if not self.service.is_allowed(user):
-            await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=NOT_ALLOWED_MESSAGE)
+            await reply(NOT_ALLOWED_MESSAGE)
             return
         if not question:
-            await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text="質問を書いてください。")
+            await reply("質問を書いてください。")
             return
 
+        context = await self._thread_context(client, event) if in_channel else None
         placeholder = await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=":mag: " + THINKING_STATUS)
-        text, blocks = await self._answer(user, question, f"{channel}:{thread_ts}", channel)
+        text, blocks = await self._answer(user, question, f"{channel}:{thread_ts}", channel,
+                                          in_channel=in_channel, context=context)
         await client.chat_update(channel=channel, ts=placeholder["ts"], text=text, blocks=blocks or [])
+
+    async def _is_shared_with_outside(self, client: Any, channel: str) -> bool:
+        """チャンネルが社外と共有されているかを Slack に問い合わせる。確かめられなければ共有されていないとみなす"""
+        try:
+            info = (await client.conversations_info(channel=channel))["channel"]
+        except Exception:
+            return False
+        return bool(info.get("is_ext_shared") or info.get("is_pending_ext_shared"))
+
+    async def _thread_context(self, client: Any, event: dict[str, Any]) -> str | None:
+        """メンションされた発言より前の、人どうしの発言を読む(ボットがまだ見ていない分だけ)"""
+        limit = self.settings.thread_context_messages
+        if limit <= 0:
+            return None
+        channel, ts = event["channel"], float(event["ts"])
+        try:
+            if event.get("thread_ts"):
+                resp = await client.conversations_replies(channel=channel, ts=event["thread_ts"], limit=200)
+                messages = [m for m in resp.get("messages", []) if float(m["ts"]) < ts]
+                # ボットが前に答えたところまでは、会話の記録に入っている
+                last_bot = max((i for i, m in enumerate(messages) if m.get("bot_id")), default=-1)
+                messages = messages[last_bot + 1:]
+            else:
+                resp = await client.conversations_history(channel=channel, latest=event["ts"], inclusive=False,
+                                                          limit=limit)
+                messages = [m for m in reversed(resp.get("messages", []))
+                            if float(m["ts"]) >= ts - CONTEXT_WINDOW_SECONDS]
+        except Exception:
+            log.warning("スレッドの発言を読めませんでした(権限が足りない可能性があります)", exc_info=True)
+            return None
+        lines = [f"<@{m.get('user', '?')}>: {m['text']}" for m in messages
+                 if not m.get("bot_id") and not m.get("subtype") and m.get("text")][-limit:]
+        text = "\n".join(lines)
+        return text[-CONTEXT_MAX_CHARS:] or None
 
     # ----- 評価 -----
 
@@ -258,14 +317,14 @@ def build_app(settings: Settings, service: QAService, prices: PriceTable):
     app.use(assistant)
 
     @app.event("app_mention")
-    async def on_mention(event, client):
-        await handlers.handle_mention(event, client)
+    async def on_mention(event, client, body):
+        await handlers.handle_mention(event, client, body)
 
     @app.event("message")
-    async def on_message(event, client):
+    async def on_message(event, client, body):
         # AI アプリのパネル以外の DM(メッセージタブ)にも答える
         if event.get("channel_type") == "im":
-            await handlers.handle_mention(event, client)
+            await handlers.handle_mention(event, client, body)
 
     @app.action(ACTION_GOOD)
     @app.action(ACTION_BAD)

@@ -325,3 +325,98 @@ def test_以前の版の合計で記録した行を1件ごとに直す(tmp_path)
     # 2回目以降は何もしない
     fixed.close()
     assert [r["virtual_cost_usd"] for r in Store(path).questions()] == pytest.approx([0.1, 0.1, 0.1, 0.05])
+
+
+# ----- チャンネルでの制限と文脈 -----
+
+class ChannelClient(FakeSlackClient):
+    def __init__(self, replies=None, history=None, ext_shared=False):
+        super().__init__()
+        self.replies, self.history, self.ext_shared = replies or [], history or [], ext_shared
+
+    async def conversations_info(self, channel):
+        return {"channel": {"id": channel, "is_ext_shared": self.ext_shared}}
+
+    async def conversations_replies(self, channel, ts, limit):
+        return {"messages": self.replies}
+
+    async def conversations_history(self, channel, latest, inclusive, limit):
+        return {"messages": self.history}
+
+
+def _mention(text="<@UBOT> これって v1.0.0 でもできる？", **kw):
+    return {"user": "UOWNER", "channel": "C1", "channel_type": "channel", "ts": "1000.0", "text": text, **kw}
+
+
+@pytest.mark.parametrize("client, body", [
+    (ChannelClient(), {"is_ext_shared_channel": True}),
+    (ChannelClient(ext_shared=True), {}),
+])
+async def test_社外と共有したチャンネルでは答えない(handlers, service, client, body):
+    from qa_bot.slack_app import EXTERNAL_CHANNEL_MESSAGE
+
+    await handlers.handle_mention(_mention(), client, body)
+    assert client.posts[0]["text"] == EXTERNAL_CHANNEL_MESSAGE
+    assert service.store.questions() == []
+
+
+async def test_許可したチャンネルでだけ答える(base_env, runner, prices):
+    from qa_bot.slack_app import CHANNEL_NOT_ALLOWED_MESSAGE
+
+    base_env["ALLOWED_CHANNELS"] = "C9"
+    s = load_settings(base_env)
+    h = SlackHandlers(s, QAService(s, runner, Store(s.db_path), prices), prices)
+    client = ChannelClient()
+    await h.handle_mention(_mention(), client)
+    assert client.posts[0]["text"] == CHANNEL_NOT_ALLOWED_MESSAGE
+    # DM はチャンネルの制限を受けない
+    await h.handle_mention({**_mention(), "channel": "D1", "channel_type": "im"}, client)
+    assert client.updates
+
+
+async def test_スレッドでは前回の回答より後の発言を文脈として渡す(handlers, runner, service):
+    replies = [
+        {"ts": "990.0", "user": "UA", "text": "古い発言"},
+        {"ts": "991.0", "bot_id": "B1", "text": "前回の回答"},
+        {"ts": "995.0", "user": "UA", "text": "カメラの台数の話です"},
+        {"ts": "996.0", "user": "UB", "text": "v1.0.0 のお客様です"},
+        {"ts": "1000.0", "user": "UOWNER", "text": "<@UBOT> これって v1.0.0 でもできる？"},
+    ]
+    await handlers.handle_mention(_mention(thread_ts="990.0"), ChannelClient(replies=replies))
+    prompt = runner.calls[0][0]
+    assert "<@UA>: カメラの台数の話です" in prompt and "<@UB>: v1.0.0 のお客様です" in prompt
+    assert "古い発言" not in prompt and "前回の回答" not in prompt
+    assert prompt.endswith("質問: これって v1.0.0 でもできる？")
+    # 記録するのは質問だけ
+    assert service.store.questions()[0]["question"] == "これって v1.0.0 でもできる？"
+
+
+async def test_スレッドの外では直近1時間の発言を文脈として渡す(handlers, runner):
+    history = [  # Slack は新しい順に返す
+        {"ts": "9999.0", "user": "UB", "text": "直前の発言"},
+        {"ts": "3000.0", "user": "UA", "text": "2時間近く前の発言"},
+    ]
+    await handlers.handle_mention(_mention(ts="10000.0"), ChannelClient(history=history))
+    prompt = runner.calls[0][0]
+    assert "直前の発言" in prompt and "2時間近く前の発言" not in prompt
+
+
+async def test_発言を読めなくても質問には答える(handlers, runner, service):
+    await handlers.handle_mention(_mention(), FakeSlackClient())
+    assert runner.calls[0][0] == "これって v1.0.0 でもできる？"
+
+
+async def test_料金の表示は既定でDMだけ(handlers):
+    channel_client, dm_client = ChannelClient(), ChannelClient()
+    await handlers.handle_mention(_mention(), channel_client)
+    await handlers.handle_mention({**_mention(), "channel": "D1", "channel_type": "im"}, dm_client)
+    assert "仮想料金" not in str(channel_client.updates[0]["blocks"])
+    assert "仮想料金" in str(dm_client.updates[0]["blocks"])
+
+
+@pytest.mark.parametrize("env, expected", [
+    ({}, "dm"), ({"COST_FOOTER": "always"}, "always"), ({"SHOW_COST_FOOTER": "false"}, "never"),
+])
+def test_料金の表示場所の設定(base_env, env, expected):
+    base_env.update(env)
+    assert load_settings(base_env).cost_footer == expected
