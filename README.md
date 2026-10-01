@@ -27,27 +27,24 @@
 
 ## 検証フェーズ(自分の PC で、自分の使用枠で、自分だけが使う)
 
-Windows の PowerShell で実行します。Python 3.11 以上と Git for Windows が必要です。
+Windows の PowerShell で実行します。Python 3.11 以上、Git for Windows、[Task](https://taskfile.dev)(`winget install Task.Task`)が必要です。
+コマンドは `Taskfile.yml` にまとめてあり、`task` だけを実行すると一覧が出ます。
 
 ```powershell
 git clone https://github.com/koyo-matsuda-hacarus/hacarus-check-qa-bot
 cd hacarus-check-qa-bot
-py -3.11 -m venv .venv
-.venv\Scripts\pip install -e ".[dev]"
-
-# 質問対象のミラーを作る(自分の PC の git の認証で取得する。2回目以降は差分だけ取得する)
-powershell -ExecutionPolicy Bypass -File scripts\sync_repo.ps1 -RepoUrl https://github.com/hacarus/hacarus-check-2025
-
-copy .env.example .env           # AUTH_MODE=subscription のままにする
-.venv\Scripts\qa-bot check       # 設定とツール制限を確認する(Claude は呼ばない)
-.venv\Scripts\qa-bot versions    # 質問に使えるバージョンの一覧
-.venv\Scripts\qa-bot ask "v3.2.1 から v3.3.2 に上げるとき、設定の移行は必要ですか？"
-.venv\Scripts\qa-bot chat        # 対話形式で質問する(/new で新しい会話、/cost で集計)
+task setup       # .venv の作成、依存関係のインストール、.env の作成(AUTH_MODE=subscription のままにする)
+task sync        # 質問対象のミラーを作る(自分の PC の git の認証で取得する。2回目以降は差分だけ取得する)
+task check       # 設定とツール制限を確認する(Claude は呼ばない)
+task versions    # 質問に使えるバージョンの一覧
+task ask -- v3.2.1 から v3.3.2 に上げるとき、設定の移行は必要ですか？
+task chat        # 対話形式で質問する(/new で新しい会話、/cost で集計)
 ```
 
 - 手元で Claude Code にログイン済みなら、そのアカウントの使用枠で動きます
 - `AUTH_MODE=subscription` のときは、Slack の利用者に自分以外を指定すると起動を拒否します。個人の使用枠をほかの人に使わせると規約違反になるためです
-- `--fake` を付けると、Claude を呼ばずにダミーの回答を返します。記録や集計の流れだけを確かめるときに使います
+- `task ask FAKE=1 -- 質問` とすると、Claude を呼ばずにダミーの回答を返します。記録や集計の流れだけを確かめるときに使います
+- `task` を使わずに `.venv\Scripts\qa-bot ask "質問"` のように直接実行することもできます
 
 ### Slack の開発用サンドボックスで試す
 
@@ -55,14 +52,14 @@ copy .env.example .env           # AUTH_MODE=subscription のままにする
 2. https://api.slack.com/apps で「Create New App」→「From an app manifest」を選び、サンドボックスを選んで `slack/manifest.yml` を貼り付ける
 3. 「Install to Workspace」で Bot User OAuth Token(`xoxb-`)を、「Basic Information」→「App-Level Tokens」で `connections:write` のトークン(`xapp-`)を発行する
 4. `.env` の `SLACK_BOT_TOKEN`、`SLACK_APP_TOKEN` と、`ALLOWED_SLACK_USERS` と `ADMIN_SLACK_USERS` に自分の Slack ユーザー ID を1つだけ書く
-5. `.venv\Scripts\qa-bot slack` で起動し、Slack の右上の AI アプリのアイコンからボットを開いて質問する
+5. `task slack` で起動し、Slack の右上の AI アプリのアイコンからボットを開いて質問する
 
 ### 仮想料金と評価の確認
 
 ```powershell
-.venv\Scripts\qa-bot cost                        # 今月の件数・評価・1件あたりの平均と、月の件数ごとの見込み
-.venv\Scripts\qa-bot cost --month 2026-10 --project 300,600,1500
-.venv\Scripts\qa-bot export-csv -o usage.csv     # 稟議の資料用に CSV で書き出す(Excel で開ける)
+task cost                                        # 今月の件数・評価・1件あたりの平均と、月の件数ごとの見込み
+task cost -- --month 2026-10 --project 300,600,1500
+task export                                      # 稟議の資料用に usage.csv へ書き出す(Excel で開ける)
 ```
 
 Slack では `/qa-cost` で同じ集計を見られます(`ADMIN_SLACK_USERS` の人だけ)。
@@ -86,11 +83,13 @@ ALLOWED_SLACK_USERS=U...,U...    # 質問できる人の ID(* で全員)
 社内の共有機では、ボット専用の Windows ユーザーを作り、管理者の PowerShell でタスクスケジューラーに登録します。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\register_tasks.ps1 -User qa-bot -SshKey C:\qa-bot\keys\deploy_key
+task sync REPO_URL=git@github.com:hacarus/hacarus-check-2025.git SSH_KEY=C:\qa-bot\keys\deploy_key
+task register USER=qa-bot SSH_KEY=C:\qa-bot\keys\deploy_key
 ```
 
 - `hacarus-check-qa-bot-sync`: 30 分ごとにミラーを同期する
 - `hacarus-check-qa-bot`: 共有機の起動時にボットを立ち上げ、落ちたら再起動する。保存期間を過ぎた記録の削除も1日1回行う
+- 登録したタスクは Task を使わず `qa-bot.exe` と同期スクリプトを直接起動するので、共有機の常駐に Task は要らない
 
 ## 情シスなどに依頼すること
 
@@ -117,7 +116,7 @@ powershell -ExecutionPolicy Bypass -File scripts\register_tasks.ps1 -User qa-bot
 ## 開発
 
 ```powershell
-.venv\Scripts\pytest
+task test
 ```
 
 テストは Claude と Slack を呼ばずに動きます。Git のテスト用リポジトリはテストの中で作ります。

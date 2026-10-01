@@ -1,0 +1,106 @@
+# 開発と運用のコマンドをまとめたもの。https://taskfile.dev
+# Windows: winget install Task.Task / Mac: brew install go-task
+#
+# 例:
+#   task setup                 最初の準備(.venv の作成、依存関係のインストール、.env の作成)
+#   task sync                  質問対象のミラーを作る・最新にする
+#   task check                 設定とツール制限を確認する
+#   task ask -- v3.3.2 で検査結果を CSV で出力できますか？
+#   task cost -- --month 2026-10
+#
+# 共有機のタスクスケジューラー(task register で登録)は、Task を使わず qa-bot.exe を直接起動する。
+version: "3"
+
+vars:
+  BIN: '{{if eq OS "windows"}}.venv/Scripts{{else}}.venv/bin{{end}}'
+  QA_BOT: "{{.BIN}}/qa-bot{{exeExt}}"
+  # 検証フェーズでは自分の PC の git の認証(HTTPS)で取得する。共有機では SSH の URL と Deploy key を渡す
+  REPO_URL: '{{.REPO_URL | default "https://github.com/hacarus/hacarus-check-2025"}}'
+  SSH_KEY: '{{.SSH_KEY | default ""}}'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  setup:
+    desc: .venv を作って依存関係を入れ、.env がなければ .env.example から作る
+    cmds:
+      - cmd: py -3.11 -m venv .venv
+        platforms: [windows]
+      - cmd: python3 -m venv .venv
+        platforms: [linux, darwin]
+      - '{{.BIN}}/python{{exeExt}} -m pip install --quiet -e ".[dev]"'
+      - "{{.BIN}}/python{{exeExt}} -c \"import os, shutil; os.path.exists('.env') or shutil.copy('.env.example', '.env')\""
+    status:
+      - test -f {{.QA_BOT}}
+
+  sync:
+    desc: 質問対象のリポジトリのミラーを作る・最新にする(REPO_URL=… SSH_KEY=… で変えられる)
+    cmds:
+      - cmd: >-
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync_repo.ps1
+          -RepoUrl "{{.REPO_URL}}"{{if .SSH_KEY}} -SshKey "{{.SSH_KEY}}"{{end}}
+        platforms: [windows]
+      - cmd: REPO_URL="{{.REPO_URL}}" SSH_KEY="{{.SSH_KEY}}" sh scripts/sync_repo.sh
+        platforms: [linux, darwin]
+
+  check:
+    desc: 設定とツール制限を確認する(Claude は呼ばない)
+    cmds:
+      - "{{.QA_BOT}} check"
+
+  versions:
+    desc: 質問に使えるバージョンの一覧を表示する
+    cmds:
+      - "{{.QA_BOT}} versions"
+
+  ask:
+    desc: 1つ質問する(task ask -- 質問文。FAKE=1 で Claude を呼ばずにダミーの回答)
+    requires:
+      vars: [CLI_ARGS]
+    cmds:
+      # -- のあとは空白を含めて全体を1つの質問として渡す
+      - '{{.QA_BOT}} ask {{if .FAKE}}--fake {{end}}{{.CLI_ARGS_LIST | join " " | shellQuote}}'
+
+  chat:
+    desc: 対話形式で質問する
+    interactive: true
+    cmds:
+      - "{{.QA_BOT}} chat {{.CLI_ARGS}}"
+
+  slack:
+    desc: Slack ボットとして起動する
+    cmds:
+      - "{{.QA_BOT}} slack {{.CLI_ARGS}}"
+
+  cost:
+    desc: 件数・評価・仮想料金を集計する(task cost -- --month 2026-10)
+    cmds:
+      - "{{.QA_BOT}} cost {{.CLI_ARGS}}"
+
+  export:
+    desc: 記録を CSV に書き出す(既定は usage.csv。task export -- --all -o all.csv)
+    cmds:
+      - "{{.QA_BOT}} export-csv {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}-o usage.csv{{end}}"
+
+  purge:
+    desc: 保存期間を過ぎた記録と会話セッションを消す
+    cmds:
+      - "{{.QA_BOT}} purge"
+
+  test:
+    desc: テストを実行する(Claude と Slack は呼ばない)
+    cmds:
+      - "{{.BIN}}/pytest{{exeExt}} {{.CLI_ARGS}}"
+
+  register:
+    desc: 共有機のタスクスケジューラーに同期とボットを登録する(管理者の PowerShell で。USER=… SSH_KEY=…)
+    platforms: [windows]
+    requires:
+      vars: [USER]
+    cmds:
+      - >-
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts/register_tasks.ps1
+        -User "{{.USER}}"{{if .SSH_KEY}} -SshKey "{{.SSH_KEY}}"{{end}}
