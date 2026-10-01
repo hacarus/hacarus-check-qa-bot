@@ -10,10 +10,32 @@ from typing import Callable
 
 from .agent import AgentAnswer, AgentRunner
 from .config import CLI_USER_ID, Settings
-from .pricing import PriceTable
+from .pricing import PriceTable, TokenUsage
 from .store import QuestionRecord, Store
 
 log = logging.getLogger(__name__)
+
+
+def per_question_usage(
+    current: dict[str, TokenUsage],
+    current_cost: float | None,
+    previous: dict[str, TokenUsage],
+    previous_cost: float | None,
+) -> tuple[dict[str, TokenUsage], float | None]:
+    """セッションの合計から前回までの合計を引き、その質問の分だけを返す
+
+    差がマイナスになる場合は合計ではなかったとみなし、そのままの値を返す。
+    """
+    diff = {m: u - previous.get(m, TokenUsage()) for m, u in current.items()}
+    if any(min(d.input, d.output, d.cache_write, d.cache_read) < 0 for d in diff.values()):
+        return current, current_cost
+    diff = {m: d for m, d in diff.items() if d.total > 0}
+    cost = None
+    if current_cost is not None:
+        cost = current_cost - (previous_cost or 0.0)
+        if cost < 0:
+            return current, current_cost
+    return diff, cost
 
 
 class NotAllowedError(Exception):
@@ -88,9 +110,23 @@ class QAService:
             if thread_key and answer.session_id and not answer.is_error:
                 self.store.set_session(thread_key, answer.session_id)
 
-        priced = {m: (u, self.prices.cost(m, u)) for m, u in answer.model_usage.items()}
+        # 会話を再開すると、Claude Code はそのセッションのそれまでの合計を引き継いで返す。
+        # 1件ごとの数字にするため、前回までの合計を差し引く
+        usage, sdk_cost = answer.model_usage, answer.sdk_cost_usd
+        if answer.session_id:
+            previous = self.store.get_session_totals(answer.session_id)
+            self.store.set_session_totals(answer.session_id, answer.model_usage, answer.sdk_cost_usd)
+            if resume is not None and previous is not None:
+                usage, sdk_cost = per_question_usage(answer.model_usage, answer.sdk_cost_usd, *previous)
+
+        priced = {m: (u, self.prices.cost(m, u)) for m, u in usage.items()}
         costs = [c for _, c in priced.values()]
-        virtual = None if (not costs or any(c is None for c in costs)) else sum(costs)  # type: ignore[arg-type]
+        if any(c is None for c in costs):
+            virtual = None  # 単価表にないモデルがある
+        elif costs:
+            virtual = sum(costs)  # type: ignore[arg-type]
+        else:
+            virtual = 0.0 if answer.model_usage else None
         keep_text = self.settings.log_question_text
 
         qid = self.store.add_question(
@@ -111,7 +147,7 @@ class QAService:
                 session_id=answer.session_id,
                 resumed=resume is not None,
                 permission_denials=answer.permission_denials,
-                sdk_cost_usd=answer.sdk_cost_usd,
+                sdk_cost_usd=sdk_cost,
                 virtual_cost_usd=virtual,
                 model_usage=priced,
                 cli_version=answer.cli_version,

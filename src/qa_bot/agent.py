@@ -160,19 +160,28 @@ class ClaudeAgentRunner:
 class FakeAgentRunner:
     """Claude を呼ばずに定型の回答と架空のトークン数を返す。配線の確認やテストに使う"""
 
+    # 1件あたりの架空のトークン数
+    PER_QUESTION = TokenUsage(input=1_000, output=8_000, cache_write=45_000, cache_read=255_000)
+
     def __init__(self, model: str = "claude-sonnet-5-5"):
         self.model = model
         self.calls: list[tuple[str, str | None]] = []
+        self._turns: dict[str, int] = {}
 
     async def ask(self, question: str, resume_session_id: str | None = None) -> AgentAnswer:
         self.calls.append((question, resume_session_id))
         n = len(self.calls)
+        session = resume_session_id or f"fake-session-{n}"
+        # 本物の Claude Code と同じく、会話を再開するとセッションの合計を返す
+        turns = self._turns[session] = self._turns.get(session, 0) + 1
+        u = self.PER_QUESTION
         return AgentAnswer(
             text=f"(ダミー回答 {n}) 「{question}」を受け付けました。",
-            session_id=resume_session_id or f"fake-session-{n}",
+            session_id=session,
             num_turns=8,
             duration_ms=1234,
-            model_usage={self.model: TokenUsage(input=1_000, output=8_000, cache_write=45_000, cache_read=255_000)},
+            model_usage={self.model: TokenUsage(u.input * turns, u.output * turns, u.cache_write * turns,
+                                                u.cache_read * turns)},
             auth_source="fake",
         )
 

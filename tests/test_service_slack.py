@@ -275,3 +275,53 @@ def test_分割は改行の位置で行う():
 def test_MarkdownをSlackの書式に寄せる():
     md = "## 結論\n**太字** と [資料](https://example.com)\n- 項目\n```\n**そのまま**\n```"
     assert to_mrkdwn(md) == "*結論*\n*太字* と <https://example.com|資料>\n• 項目\n```\n**そのまま**\n```"
+
+
+# ----- 会話を続けたときのトークン数 -----
+
+def test_セッションの合計から前回分を引く():
+    from qa_bot.pricing import TokenUsage
+    from qa_bot.service import per_question_usage
+
+    cur = {"m": TokenUsage(30, 300, 3000, 30000), "h": TokenUsage(900, 10, 0, 0)}
+    prev = {"m": TokenUsage(10, 100, 1000, 10000), "h": TokenUsage(900, 10, 0, 0)}
+    usage, cost = per_question_usage(cur, 0.9, prev, 0.4)
+    assert usage == {"m": TokenUsage(20, 200, 2000, 20000)}
+    assert cost == pytest.approx(0.5)
+    # 減っていれば合計ではなかったとみなし、そのまま使う
+    assert per_question_usage(prev, 0.4, cur, 0.9) == (prev, 0.4)
+
+
+async def test_会話を続けても1件ごとの料金を記録する(service, prices):
+    first = await service.ask(CLI_USER_ID, "1つめ", thread_key="t1")
+    second = await service.ask(CLI_USER_ID, "2つめ", thread_key="t1")
+    third = await service.ask(CLI_USER_ID, "3つめ", thread_key="t1")
+    assert first.virtual_cost_usd == pytest.approx(second.virtual_cost_usd)
+    assert second.virtual_cost_usd == pytest.approx(third.virtual_cost_usd)
+    rows = service.store.model_rows()
+    assert {r["output_tokens"] for r in rows} == {FakeAgentRunner.PER_QUESTION.output}
+
+
+def test_以前の版の合計で記録した行を1件ごとに直す(tmp_path):
+    from qa_bot.pricing import TokenUsage
+
+    path = tmp_path / "old.sqlite3"
+    store = Store(path)
+    store.conn.execute("DELETE FROM meta")  # 補正前の記録ファイルを再現する
+    for i, resumed in enumerate([False, True, True], start=1):
+        store.add_question(record("U", 0.1 * i, session_id="s1", resumed=resumed,
+                                  model_usage={"claude-sonnet-5-5": (TokenUsage(i, 10 * i, 100 * i, 1000 * i), 0.1 * i)}))
+    store.add_question(record("U", 0.05, session_id="s2", resumed=False,
+                              model_usage={"claude-sonnet-5-5": (TokenUsage(5, 5, 5, 5), 0.05)}))
+    store.conn.commit()
+    store.close()
+
+    fixed = Store(path)
+    costs = [r["virtual_cost_usd"] for r in fixed.questions()]
+    assert costs == pytest.approx([0.1, 0.1, 0.1, 0.05])
+    rows = sorted(fixed.model_rows(), key=lambda r: r["question_id"])
+    assert [r["output_tokens"] for r in rows] == [10, 10, 10, 5]
+    assert fixed.get_session_totals("s1")[0]["claude-sonnet-5-5"] == TokenUsage(3, 30, 300, 3000)
+    # 2回目以降は何もしない
+    fixed.close()
+    assert [r["virtual_cost_usd"] for r in Store(path).questions()] == pytest.approx([0.1, 0.1, 0.1, 0.05])

@@ -24,6 +24,14 @@ class TokenUsage:
             self.cache_read + other.cache_read,
         )
 
+    def __sub__(self, other: "TokenUsage") -> "TokenUsage":
+        return TokenUsage(
+            self.input - other.input,
+            self.output - other.output,
+            self.cache_write - other.cache_write,
+            self.cache_read - other.cache_read,
+        )
+
     @property
     def total(self) -> int:
         return self.input + self.output + self.cache_write + self.cache_read

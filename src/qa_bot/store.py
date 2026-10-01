@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
@@ -55,6 +56,17 @@ CREATE TABLE IF NOT EXISTS threads (
     session_id TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+-- 会話セッションごとの、Claude Code が返したトークン数の合計(1件ごとの差分を出すのに使う)
+CREATE TABLE IF NOT EXISTS session_totals (
+    session_id TEXT PRIMARY KEY,
+    usage_json TEXT NOT NULL,
+    sdk_cost_usd REAL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_questions_asked_at ON questions(asked_at);
 CREATE INDEX IF NOT EXISTS idx_questions_user ON questions(user_id, asked_at);
 """
@@ -105,6 +117,43 @@ class Store:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(questions)")}
         if "cli_version" not in cols:
             self.conn.execute("ALTER TABLE questions ADD COLUMN cli_version TEXT")
+        self._fix_cumulative_usage()
+        self.conn.commit()
+
+    def _fix_cumulative_usage(self) -> None:
+        """以前の版は、会話を続けた質問にセッションの合計を記録していた。1件ごとの差分に直す(1回だけ)"""
+        if self.conn.execute("SELECT 1 FROM meta WHERE key = 'usage_per_question'").fetchone():
+            return
+        sessions: dict[str, dict[str, tuple[TokenUsage, float | None]]] = {}
+        session_cost: dict[str, float | None] = {}
+        for q in self.conn.execute("SELECT * FROM questions WHERE session_id IS NOT NULL ORDER BY id").fetchall():
+            rows = self.conn.execute("SELECT * FROM question_models WHERE question_id = ?", (q["id"],)).fetchall()
+            current = {r["model"]: (TokenUsage(r["input_tokens"], r["output_tokens"], r["cache_write_tokens"],
+                                               r["cache_read_tokens"]), r["virtual_cost_usd"]) for r in rows}
+            sid = q["session_id"]
+            previous = sessions.get(sid)
+            if q["resumed"] and previous is not None:
+                diffs = {m: (u - previous.get(m, (TokenUsage(), 0.0))[0], c) for m, (u, c) in current.items()}
+                if all(min(d.input, d.output, d.cache_write, d.cache_read) >= 0 for d, _ in diffs.values()):
+                    self.conn.execute("DELETE FROM question_models WHERE question_id = ?", (q["id"],))
+                    total = 0.0
+                    for m, (d, c) in diffs.items():
+                        prev_c = previous.get(m, (TokenUsage(), 0.0))[1]
+                        cost = None if c is None else c - (prev_c or 0.0)
+                        total += cost or 0.0
+                        if d.total > 0:
+                            self.conn.execute("INSERT INTO question_models VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                              (q["id"], m, d.input, d.output, d.cache_write, d.cache_read, cost))
+                    sdk = q["sdk_cost_usd"]
+                    sdk_diff = None if sdk is None else sdk - (session_cost.get(sid) or 0.0)
+                    virtual = None if q["virtual_cost_usd"] is None else total
+                    self.conn.execute("UPDATE questions SET virtual_cost_usd = ?, sdk_cost_usd = ? WHERE id = ?",
+                                      (virtual, sdk_diff, q["id"]))
+            sessions[sid] = current
+            session_cost[sid] = q["sdk_cost_usd"]
+        for sid, current in sessions.items():
+            self.set_session_totals(sid, {m: u for m, (u, _) in current.items()}, session_cost.get(sid), commit=False)
+        self.conn.execute("INSERT INTO meta (key, value) VALUES ('usage_per_question', '1')")
 
     def close(self) -> None:
         self.conn.close()
@@ -122,6 +171,25 @@ class Store:
             (thread_key, session_id, _iso(_now())),
         )
         self.conn.commit()
+
+    def get_session_totals(self, session_id: str) -> tuple[dict[str, TokenUsage], float | None] | None:
+        row = self.conn.execute("SELECT * FROM session_totals WHERE session_id = ?", (session_id,)).fetchone()
+        if row is None:
+            return None
+        usage = {m: TokenUsage(**u) for m, u in json.loads(row["usage_json"]).items()}
+        return usage, row["sdk_cost_usd"]
+
+    def set_session_totals(self, session_id: str, usage: dict[str, TokenUsage], sdk_cost_usd: float | None,
+                           commit: bool = True) -> None:
+        data = json.dumps({m: u.__dict__ for m, u in usage.items()})
+        self.conn.execute(
+            "INSERT INTO session_totals (session_id, usage_json, sdk_cost_usd, updated_at) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(session_id) DO UPDATE SET usage_json = excluded.usage_json,"
+            " sdk_cost_usd = excluded.sdk_cost_usd, updated_at = excluded.updated_at",
+            (session_id, data, sdk_cost_usd, _iso(_now())),
+        )
+        if commit:
+            self.conn.commit()
 
     # ----- 質問 -----
 
@@ -207,6 +275,7 @@ class Store:
         # まだ続いている会話のセッションは残す
         old -= {r[0] for r in self.conn.execute("SELECT session_id FROM threads WHERE updated_at >= ?", (cutoff,))}
         self.conn.execute("DELETE FROM threads WHERE updated_at < ?", (cutoff,))
+        self.conn.execute("DELETE FROM session_totals WHERE updated_at < ?", (cutoff,))
         self.conn.execute("DELETE FROM questions WHERE asked_at < ?", (_iso(now - timedelta(days=retention_days)),))
         self.conn.commit()
         return sorted(old)
