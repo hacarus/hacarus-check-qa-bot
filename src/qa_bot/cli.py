@@ -58,6 +58,9 @@ def cmd_check(settings: Settings, _args) -> int:
     print(f"1人1日の上限    : {settings.daily_limit_per_user or 'なし'} 件")
     users = "全員" if settings.allowed_slack_users is None else (", ".join(sorted(settings.allowed_slack_users)) or "なし(CLI のみ)")
     print(f"Slack の利用者  : {users}")
+    if settings.allowed_slack_groups or settings.admin_slack_groups:
+        print(f"ユーザーグループ: 利用者 {', '.join(settings.allowed_slack_groups) or 'なし'}"
+              f" / 管理者 {', '.join(settings.admin_slack_groups) or 'なし'}(メンバーは Slack から読む)")
     print(f"Slack 連携      : {'有効' if settings.slack_enabled else '未設定'}")
     print(f"記録先          : {settings.db_path}(保存 {settings.retention_days} 日、セッション {settings.session_retention_days} 日)")
 

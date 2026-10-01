@@ -11,6 +11,7 @@ from typing import Callable
 from .agent import AgentAnswer, AgentRunner
 from .config import CLI_USER_ID, Settings
 from .pricing import PriceTable, TokenUsage
+from .slack_groups import GroupMembers
 from .store import QuestionRecord, Store
 
 log = logging.getLogger(__name__)
@@ -80,6 +81,7 @@ class QAService:
         self.store = store
         self.prices = prices
         self.session_deleter = session_deleter
+        self.groups = GroupMembers()
         self._semaphore = asyncio.Semaphore(settings.max_concurrency)
         # 同じスレッドで続けて質問されたとき、同じセッションを同時に再開しないようにする
         self._thread_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -87,7 +89,13 @@ class QAService:
     def is_allowed(self, user_id: str) -> bool:
         if user_id == CLI_USER_ID:
             return True
-        return self.settings.is_slack_user_allowed(user_id)
+        return self.settings.is_slack_user_allowed(user_id, self.groups.users(self.settings.allowed_slack_groups))
+
+    def is_admin(self, user_id: str) -> bool:
+        return self.settings.is_admin(user_id, self.groups.users(self.settings.admin_slack_groups))
+
+    async def refresh_groups(self, client) -> None:
+        await self.groups.refresh(client, (*self.settings.allowed_slack_groups, *self.settings.admin_slack_groups))
 
     def check_quota(self, user_id: str) -> None:
         limit = self.settings.daily_limit_per_user

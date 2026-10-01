@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable
 from .config import Settings
 from .pricing import PriceTable
 from .report import format_summary, summarize
+from .slack_groups import REFRESH_SECONDS
 from .service import DailyLimitError, NotAllowedError, QAService, ServiceAnswer
 
 log = logging.getLogger(__name__)
@@ -293,7 +294,7 @@ class SlackHandlers:
     # ----- 管理者向け -----
 
     async def handle_cost_command(self, command: dict[str, Any]) -> str:
-        if not self.settings.is_admin(command.get("user_id", "")):
+        if not self.service.is_admin(command.get("user_id", "")):
             return "このコマンドは管理者だけが使えます。"
         month = (command.get("text") or "").strip() or None
         return format_summary(summarize(self.service.store, self.prices, month))
@@ -355,12 +356,21 @@ async def _purge_daily(service: QAService) -> None:
         await asyncio.sleep(24 * 60 * 60)
 
 
+async def _refresh_groups(service: QAService, client: Any) -> None:
+    while True:
+        await service.refresh_groups(client)
+        await asyncio.sleep(REFRESH_SECONDS)
+
+
 async def run_socket_mode(settings: Settings, service: QAService, prices: PriceTable) -> None:
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
     app = build_app(settings, service, prices)
-    purge_task = asyncio.create_task(_purge_daily(service))
+    # 起動してすぐの質問にも答えられるよう、先にユーザーグループのメンバーを読む
+    await service.refresh_groups(app.client)
+    tasks = [asyncio.create_task(_purge_daily(service)), asyncio.create_task(_refresh_groups(service, app.client))]
     try:
         await AsyncSocketModeHandler(app, settings.slack_app_token).start_async()
     finally:
-        purge_task.cancel()
+        for t in tasks:
+            t.cancel()

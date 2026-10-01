@@ -57,3 +57,24 @@ def test_値の誤りは起動前に分かる(base_env, key, value):
     base_env[key] = value
     with pytest.raises(ConfigError):
         load_settings(base_env)
+
+
+def test_ユーザーグループをIDかハンドル名で指定できる(base_env):
+    base_env.update(
+        AUTH_MODE="api", ANTHROPIC_API_KEY="sk-ant-xxx",
+        ALLOWED_SLACK_USERS="UONE,S0123ABCD,@sales", ADMIN_SLACK_USERS="@qa-admins",
+    )
+    s = load_settings(base_env)
+    assert s.allowed_slack_groups == ("S0123ABCD", "@sales")
+    assert s.admin_slack_groups == ("@qa-admins",)
+    assert s.is_slack_user_allowed("UONE")
+    assert not s.is_slack_user_allowed("UMEMBER")
+    assert s.is_slack_user_allowed("UMEMBER", frozenset({"UMEMBER"}))
+    assert s.is_admin("UMEMBER", frozenset({"UMEMBER"}))
+
+
+@pytest.mark.parametrize("users", ["UOWNER,@sales", "S0123ABCD"])
+def test_subscriptionではユーザーグループを指定できない(base_env, users):
+    base_env["ALLOWED_SLACK_USERS"] = users
+    with pytest.raises(ConfigError):
+        load_settings(base_env)

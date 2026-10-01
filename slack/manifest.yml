@@ -33,6 +33,8 @@ oauth_config:
       - channels:read
       - groups:read
       - commands
+      # ALLOWED_SLACK_USERS / ADMIN_SLACK_USERS に書いたユーザーグループのメンバーを読む
+      - usergroups:read
 settings:
   event_subscriptions:
     bot_events:

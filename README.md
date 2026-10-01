@@ -64,7 +64,7 @@ task cost -- --month 2026-10 --project 300,600,1500
 task export                                      # 稟議の資料用に usage.csv へ書き出す(Excel で開ける)
 ```
 
-Slack では `/qa-cost` で同じ集計を見られます(`ADMIN_SLACK_USERS` の人だけ)。
+Slack では `/qa-cost` で同じ集計を見られます(`ADMIN_SLACK_USERS` の人とグループのメンバーだけ)。
 使用枠でも API でもトークンの数え方は同じなので、ここで測った数字がそのまま公開後の見積もりになります。
 キャッシュ書き込みは 5 分 TTL の単価(入力の 1.25 倍)で計算しています。単価は `config/pricing.toml` にあります。
 
@@ -76,7 +76,7 @@ Slack では `/qa-cost` で同じ集計を見られます(`ADMIN_SLACK_USERS` �
 AUTH_MODE=api
 ANTHROPIC_API_KEY=sk-ant-...     # Console でワークスペースの月の上限額も設定する
 CLAUDE_CODE_OAUTH_TOKEN=         # 空にする
-ALLOWED_SLACK_USERS=U...,U...    # 質問できる人の ID(* で全員)
+ALLOWED_SLACK_USERS=@sales,U...  # 質問できる人の ID かユーザーグループ(* で全員)
 ```
 
 `AUTH_MODE=api` なのに API キーがない場合や、`AUTH_MODE=subscription` なのに API キーが残っている場合も起動を拒否します。
@@ -108,6 +108,7 @@ task register USER=qa-bot SSH_KEY=C:\qa-bot\keys\deploy_key
 | 変数 | 既定 | 説明 |
 |---|---|---|
 | `MODEL` | `claude-sonnet-5-5` | 使うモデル |
+| `ALLOWED_SLACK_USERS` / `ADMIN_SLACK_USERS` | 空欄 | 質問できる人と管理者。ユーザー ID のほか、ユーザーグループ(`S…` の ID か `@ハンドル名`)も書ける |
 | `MAX_TURNS` / `MAX_BUDGET_USD` | `30` / `2.0` | 1つの質問で許す往復回数と料金の上限 |
 | `DAILY_LIMIT_PER_USER` | `20` | 1人が1日に質問できる件数 |
 | `ALLOWED_CHANNELS` | 空欄 | メンションで答えるチャンネル(空欄なら招待したすべて。社外と共有したチャンネルでは答えない) |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Mapping
@@ -38,6 +39,9 @@ class Settings:
     deny_paths: tuple[str, ...]
     allowed_slack_users: frozenset[str] | None  # None は全員を許可
     admin_slack_users: frozenset[str]
+    # Slack のユーザーグループ(S で始まる ID か @ハンドル名)。メンバーは Slack から読み直す
+    allowed_slack_groups: tuple[str, ...] = ()
+    admin_slack_groups: tuple[str, ...] = ()
     retention_days: int = 365
     session_retention_days: int = 30
     git_path: str = "git"
@@ -62,13 +66,26 @@ class Settings:
     def slack_enabled(self) -> bool:
         return bool(self.slack_bot_token and self.slack_app_token)
 
-    def is_slack_user_allowed(self, user_id: str) -> bool:
+    def is_slack_user_allowed(self, user_id: str, group_members: frozenset[str] = frozenset()) -> bool:
+        """group_members は allowed_slack_groups のメンバーを Slack から読んだもの"""
         if self.allowed_slack_users is None:
             return True
-        return user_id in self.allowed_slack_users
+        return user_id in self.allowed_slack_users or user_id in group_members
 
-    def is_admin(self, user_id: str) -> bool:
-        return user_id == CLI_USER_ID or user_id in self.admin_slack_users
+    def is_admin(self, user_id: str, group_members: frozenset[str] = frozenset()) -> bool:
+        return user_id == CLI_USER_ID or user_id in self.admin_slack_users or user_id in group_members
+
+
+GROUP_ID_RE = re.compile(r"^S[A-Z0-9]{6,}$")
+
+
+def is_group_token(token: str) -> bool:
+    return token.startswith("@") or bool(GROUP_ID_RE.match(token))
+
+
+def _users_and_groups(value: str | None) -> tuple[list[str], tuple[str, ...]]:
+    tokens = _split(value)
+    return [t for t in tokens if not is_group_token(t)], tuple(t for t in tokens if is_group_token(t))
 
 
 def _split(value: str | None) -> list[str]:
@@ -136,7 +153,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
             "scripts/sync_repo.ps1(Windows)か scripts/sync_repo.sh で作成してください"
         )
 
-    allowed_raw = _split(env.get("ALLOWED_SLACK_USERS"))
+    allowed_raw, allowed_groups = _users_and_groups(env.get("ALLOWED_SLACK_USERS"))
+    admin_users, admin_groups = _users_and_groups(env.get("ADMIN_SLACK_USERS"))
     allowed: frozenset[str] | None
     if allowed_raw == ["*"]:
         allowed = None
@@ -149,10 +167,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
 
     if auth_mode == "subscription":
         # 個人の使用枠をほかの人に使わせると規約違反になるため、本人1人に限る
-        if allowed is None or len(allowed) > 1:
+        if allowed is None or len(allowed) > 1 or allowed_groups:
             raise ConfigError(
                 "AUTH_MODE=subscription では ALLOWED_SLACK_USERS に自分の Slack ユーザー ID を"
-                "1つだけ指定してください(空欄なら Slack からは誰も使えません)。"
+                "1つだけ指定してください(ユーザーグループは使えません。空欄なら Slack からは誰も使えません)。"
                 "ほかの人に公開するときは AUTH_MODE=api に切り替えてください"
             )
         if has_api_key:
@@ -185,7 +203,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         faq_path=_path(env.get("FAQ_PATH"), "knowledge/faq.md"),
         deny_paths=tuple(_split(env.get("DENY_PATHS", ".git/**"))),
         allowed_slack_users=allowed,
-        admin_slack_users=frozenset(_split(env.get("ADMIN_SLACK_USERS"))),
+        admin_slack_users=frozenset(admin_users),
+        allowed_slack_groups=allowed_groups,
+        admin_slack_groups=admin_groups,
         retention_days=_int(env, "RETENTION_DAYS", 365),
         session_retention_days=_int(env, "SESSION_RETENTION_DAYS", 30),
         git_path=env.get("GIT_PATH", "git").strip() or "git",
