@@ -114,6 +114,7 @@ class QAService:
                 sdk_cost_usd=answer.sdk_cost_usd,
                 virtual_cost_usd=virtual,
                 model_usage=priced,
+                cli_version=answer.cli_version,
             )
         )
         return ServiceAnswer(answer=answer, virtual_cost_usd=virtual, question_id=qid, resumed=resume is not None)

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS questions (
     duration_ms INTEGER,
     auth_mode TEXT NOT NULL,
     auth_source TEXT,
+    cli_version TEXT,
     configured_model TEXT NOT NULL,
     session_id TEXT,
     resumed INTEGER NOT NULL,
@@ -81,6 +82,7 @@ class QuestionRecord:
     virtual_cost_usd: float | None
     model_usage: dict[str, tuple[TokenUsage, float | None]]
     asked_at: datetime | None = None
+    cli_version: str | None = None
 
 
 def _iso(dt: datetime) -> str:
@@ -99,6 +101,10 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        # 列を足す前に作った記録ファイルにも列を足す
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(questions)")}
+        if "cli_version" not in cols:
+            self.conn.execute("ALTER TABLE questions ADD COLUMN cli_version TEXT")
 
     def close(self) -> None:
         self.conn.close()
@@ -122,12 +128,12 @@ class Store:
     def add_question(self, r: QuestionRecord) -> int:
         cur = self.conn.execute(
             "INSERT INTO questions (asked_at, user_id, channel, thread_key, question, answer, answer_chars, is_error,"
-            " subtype, num_turns, duration_ms, auth_mode, auth_source, configured_model, session_id, resumed,"
-            " permission_denials, sdk_cost_usd, virtual_cost_usd)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " subtype, num_turns, duration_ms, auth_mode, auth_source, cli_version, configured_model, session_id,"
+            " resumed, permission_denials, sdk_cost_usd, virtual_cost_usd)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 _iso(r.asked_at or _now()), r.user_id, r.channel, r.thread_key, r.question, r.answer, r.answer_chars,
-                int(r.is_error), r.subtype, r.num_turns, r.duration_ms, r.auth_mode, r.auth_source,
+                int(r.is_error), r.subtype, r.num_turns, r.duration_ms, r.auth_mode, r.auth_source, r.cli_version,
                 r.configured_model, r.session_id, int(r.resumed), r.permission_denials, r.sdk_cost_usd,
                 r.virtual_cost_usd,
             ),

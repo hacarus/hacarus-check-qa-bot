@@ -25,6 +25,7 @@ class AgentAnswer:
     sdk_cost_usd: float | None = None
     auth_source: str | None = None
     permission_denials: int = 0
+    cli_version: str | None = None
 
 
 class AgentRunner(Protocol):
@@ -115,11 +116,14 @@ class ClaudeAgentRunner:
         options = build_options(self.settings, self.repo, resume_session_id)
         texts: list[str] = []
         auth_source: str | None = None
+        cli_version: str | None = None
         result: ResultMessage | None = None
 
         async for message in query(prompt=question, options=options):
             if isinstance(message, SystemMessage) and message.subtype == "init":
                 auth_source = message.data.get("apiKeySource")
+                # 実際に動いた Claude Code の版(同梱版ではなく PATH 上の古い版が使われていないかの確認用)
+                cli_version = message.data.get("claude_code_version")
             elif isinstance(message, AssistantMessage):
                 texts.extend(b.text for b in message.content if isinstance(b, TextBlock))
             elif isinstance(message, ResultMessage):
@@ -147,6 +151,7 @@ class ClaudeAgentRunner:
             sdk_cost_usd=result.total_cost_usd,
             auth_source=auth_source,
             permission_denials=len(result.permission_denials or []),
+            cli_version=cli_version,
         )
 
 

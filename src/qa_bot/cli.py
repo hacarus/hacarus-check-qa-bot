@@ -41,7 +41,8 @@ def _print_answer(result) -> None:
     )
     print(
         f"\n--- {a.num_turns} 往復 / {a.duration_ms / 1000:.1f} 秒 / 仮想料金 {cost}"
-        f" / 認証 {a.auth_source or '不明'} / 拒否したツール呼び出し {a.permission_denials} 件"
+        f" / 認証 {a.auth_source or '不明'} / Claude Code {a.cli_version or '不明'}"
+        f" / 拒否したツール呼び出し {a.permission_denials} 件"
         f"{' / 会話の続き' if result.resumed else ''}\n--- {tokens}",
         file=sys.stderr,
     )
