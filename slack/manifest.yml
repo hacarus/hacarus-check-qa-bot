@@ -1,6 +1,6 @@
 # Slack アプリを作るときのマニフェスト
 # https://api.slack.com/apps →「Create New App」→「From an app manifest」に貼り付ける
-# 検証では Slack Developer Program のサンドボックスに、公開では社内のワークスペースに作る
+# 社内のワークスペースに作る(社外のワークスペースには社内の情報を載せない)。検証中は ALLOWED_SLACK_USERS で自分だけに限る
 display_information:
   name: HACARUS Check 相談窓口
   description: HACARUS Check 2025 のリポジトリについて質問できるボット(読み取り専用)

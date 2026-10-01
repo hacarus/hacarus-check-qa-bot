@@ -47,13 +47,14 @@ task chat        # 対話形式で質問する(/new で新しい会話、/cost �
 - `task ask FAKE=1 -- 質問` とすると、Claude を呼ばずにダミーの回答を返します。記録や集計の流れだけを確かめるときに使います
 - `task` を使わずに `.venv\Scripts\qa-bot ask "質問"` のように直接実行することもできます
 
-### Slack の開発用サンドボックスで試す
+### 社内の Slack で試す(自分だけが使う試験用アプリ)
 
-1. [Slack Developer Program](https://api.slack.com/developer-program) に参加し、サンドボックスのワークスペースを作る
-2. https://api.slack.com/apps で「Create New App」→「From an app manifest」を選び、サンドボックスを選んで `slack/manifest.yml` を貼り付ける
-3. 「Install to Workspace」で Bot User OAuth Token(`xoxb-`)を、「Basic Information」→「App-Level Tokens」で `connections:write` のトークン(`xapp-`)を発行する
-4. `.env` の `SLACK_BOT_TOKEN`、`SLACK_APP_TOKEN` と、`ALLOWED_SLACK_USERS` と `ADMIN_SLACK_USERS` に自分の Slack ユーザー ID を1つだけ書く
-5. `task slack` で起動し、Slack の右上の AI アプリのアイコンからボットを開いて質問する
+社外のワークスペースには社内の情報を載せないため、検証も社内のワークスペースで行います。アプリの追加は管理者(情シス)に依頼します。
+
+1. 情シスに `slack/manifest.yml` でアプリを作ってもらい、Bot User OAuth Token(`xoxb-`)と、`connections:write` の App-Level Token(`xapp-`)を受け取る
+2. `.env` の `SLACK_BOT_TOKEN`、`SLACK_APP_TOKEN` と、`ALLOWED_SLACK_USERS` と `ADMIN_SLACK_USERS` に自分の Slack メンバー ID を1つだけ書く
+   - `AUTH_MODE=subscription` のままなら、自分以外の ID を書くと起動を拒否する。ほかの人が話しかけても答えない
+3. `task check` で「Slack 連携: 有効」と出たら `task slack` で起動し、Slack の AI アプリのパネルか DM で質問する(試している間は PC を起動したままにする)
 
 ### 仮想料金と評価の確認
 
