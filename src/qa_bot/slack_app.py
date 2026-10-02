@@ -52,6 +52,8 @@ SUGGESTED_PROMPTS = [
 ACTION_GOOD = "qa_good"
 ACTION_BAD = "qa_bad"
 VIEW_BAD_REASON = "qa_bad_reason"
+# 会話の記録に入った回答の目印。断りやエラーの返事にはつけない
+ANSWER_BLOCK_ID = "qa_answer"
 
 
 def strip_mention(text: str) -> str:
@@ -105,6 +107,7 @@ def answer_blocks(text: str, footer: str | None, question_id: int | None,
         {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
         for chunk in split_text(to_mrkdwn(text))[:MAX_SECTIONS]
     ]
+    blocks[0]["block_id"] = ANSWER_BLOCK_ID
     if note:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": note}]})
     if footer:
@@ -121,6 +124,10 @@ def answer_blocks(text: str, footer: str | None, question_id: int | None,
             ],
         })
     return blocks
+
+
+def _is_answer(message: dict[str, Any]) -> bool:
+    return any(b.get("block_id") == ANSWER_BLOCK_ID for b in message.get("blocks") or [])
 
 
 def bad_reason_view(question_id: int) -> dict[str, Any]:
@@ -303,8 +310,8 @@ class SlackHandlers:
             if event.get("thread_ts"):
                 resp = await client.conversations_replies(channel=channel, ts=event["thread_ts"], limit=200)
                 messages = [m for m in resp.get("messages", []) if float(m["ts"]) < ts]
-                # ボットが前に答えたところまでは、会話の記録に入っている
-                last_bot = max((i for i, m in enumerate(messages) if m.get("bot_id")), default=-1)
+                # ボットが前に答えたところまでは、会話の記録に入っている。断りやエラーの返事は数えない
+                last_bot = max((i for i, m in enumerate(messages) if m.get("bot_id") and _is_answer(m)), default=-1)
                 messages = messages[last_bot + 1:]
             else:
                 resp = await client.conversations_history(channel=channel, latest=event["ts"], inclusive=False,

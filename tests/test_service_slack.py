@@ -396,7 +396,7 @@ async def test_許可したチャンネルでだけ答える(base_env, runner, p
 async def test_スレッドでは前回の回答より後の発言を文脈として渡す(handlers, runner, service):
     replies = [
         {"ts": "990.0", "user": "UA", "text": "古い発言"},
-        {"ts": "991.0", "bot_id": "B1", "text": "前回の回答"},
+        {"ts": "991.0", "bot_id": "B1", "text": "前回の回答", "blocks": answer_blocks("前回の回答", None, 1)},
         {"ts": "995.0", "user": "UA", "text": "カメラの台数の話です"},
         {"ts": "996.0", "user": "UB", "text": "v1.0.0 のお客様です"},
         {"ts": "1000.0", "user": "UOWNER", "text": "<@UBOT> これって v1.0.0 でもできる？"},
@@ -408,6 +408,16 @@ async def test_スレッドでは前回の回答より後の発言を文脈と�
     assert prompt.endswith("質問: これって v1.0.0 でもできる？")
     # 記録するのは質問だけ
     assert service.store.questions()[0]["question"] == "これって v1.0.0 でもできる？"
+
+
+async def test_断りの返事のあとでもスレッドの発言を文脈として渡す(handlers, runner):
+    replies = [
+        {"ts": "990.0", "user": "UOTHER", "text": "<@UBOT> 再学習の方法はある？"},
+        {"ts": "991.0", "bot_id": "B1", "text": NOT_ALLOWED_MESSAGE},
+        {"ts": "1000.0", "user": "UOWNER", "text": "<@UBOT> これってどう思う？"},
+    ]
+    await handlers.handle_mention(_mention("<@UBOT> これってどう思う？", thread_ts="990.0"), ChannelClient(replies=replies))
+    assert "再学習の方法はある？" in runner.calls[0][0]
 
 
 async def test_スレッドの外では直近1時間の発言を文脈として渡す(handlers, runner):
