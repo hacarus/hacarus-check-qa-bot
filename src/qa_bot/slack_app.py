@@ -29,6 +29,8 @@ EXTERNAL_CHANNEL_MESSAGE = (
     "社外の方が参加しているチャンネルでは、社内向けの情報を含むためお答えできません。"
     "ボットへの DM で質問してください。"
 )
+REASON_RETRY_MESSAGE = ("👎 の評価は記録しましたが、理由の入力欄を開けませんでした。"
+                        "理由も書く場合は、もう一度 👎 を押してください。")
 CHANNEL_NOT_ALLOWED_MESSAGE = "このチャンネルではお答えできません。ボットへの DM で質問してください。"
 # 文字を書かずにファイルだけを送られたときの質問
 FILES_ONLY_QUESTION = "添付したファイルの内容から、何が起きているか、どう対処すればよいかを教えてください。"
@@ -323,9 +325,17 @@ class SlackHandlers:
             return
         qid = int(action["value"])
         good = action["action_id"] == ACTION_GOOD
-        self.service.rate(qid, user, 1 if good else -1)
         if not good:
-            await client.views_open(trigger_id=body["trigger_id"], view=bad_reason_view(qid))
+            # trigger_id の期限はボタンを押してから3秒なので、ほかの処理より先に入力欄を開く
+            try:
+                await client.views_open(trigger_id=body["trigger_id"], view=bad_reason_view(qid))
+            except Exception:
+                log.warning("理由の入力欄を開けませんでした(質問 %d)", qid, exc_info=True)
+                self.service.rate(qid, user, -1)
+                # もう一度押せるよう、ボタンは残す
+                await client.chat_postEphemeral(channel=body["channel"]["id"], user=user, text=REASON_RETRY_MESSAGE)
+                return
+        self.service.rate(qid, user, 1 if good else -1)
 
         # 押したことが分かるよう、ボタンを評価の結果に置き換える
         message = body.get("message") or {}

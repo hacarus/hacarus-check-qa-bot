@@ -6,7 +6,7 @@ from qa_bot.agent import AgentAnswer, FakeAgentRunner
 from qa_bot.config import CLI_USER_ID, load_settings
 from qa_bot.service import DailyLimitError, NotAllowedError, QAService
 from qa_bot.slack_app import (
-    ACTION_BAD, ACTION_GOOD, NOT_ALLOWED_MESSAGE, SUGGESTED_PROMPTS, SlackHandlers, answer_blocks, split_text,
+    ACTION_BAD, ACTION_GOOD, NOT_ALLOWED_MESSAGE, REASON_RETRY_MESSAGE, SUGGESTED_PROMPTS, SlackHandlers, answer_blocks, split_text,
     strip_mention, to_mrkdwn,
 )
 from qa_bot.store import Store
@@ -38,6 +38,7 @@ class FakeSlackClient:
         self.posts: list[dict] = []
         self.updates: list[dict] = []
         self.views: list[dict] = []
+        self.ephemerals: list[dict] = []
 
     async def chat_postMessage(self, **kwargs):
         self.posts.append(kwargs)
@@ -49,6 +50,10 @@ class FakeSlackClient:
 
     async def views_open(self, **kwargs):
         self.views.append(kwargs)
+        return {"ok": True}
+
+    async def chat_postEphemeral(self, **kwargs):
+        self.ephemerals.append(kwargs)
         return {"ok": True}
 
 
@@ -248,6 +253,20 @@ async def test_悪い評価では理由を聞き任意で記録する(handlers, 
     await handlers.handle_bad_reason({"user": {"id": "UOWNER"}, "view": {
         "private_metadata": str(qid), "state": {"values": {"reason": {"text": {"value": " 古い版の説明だった "}}}}}})
     assert service.store.feedback_rows()[0]["reason"] == "古い版の説明だった"
+
+
+class ExpiredTriggerClient(FakeSlackClient):
+    async def views_open(self, **kwargs):
+        raise RuntimeError("expired_trigger_id")
+
+
+async def test_理由の入力欄を開けなくても悪い評価は記録しボタンを残す(handlers, service):
+    qid = (await service.ask(CLI_USER_ID, "質問")).question_id
+    client = ExpiredTriggerClient()
+    await handlers.handle_feedback(_action_body(ACTION_BAD, qid), client)
+    assert service.store.feedback_rows()[0]["rating"] == -1
+    assert client.ephemerals == [{"channel": "D1", "user": "UOWNER", "text": REASON_RETRY_MESSAGE}]
+    assert client.updates == []
 
 
 async def test_許可されていない人の評価は記録しない(handlers, service):
