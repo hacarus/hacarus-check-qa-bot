@@ -2,7 +2,7 @@
 # https://api.slack.com/apps →「Create New App」→「From an app manifest」に貼り付ける
 # 社内のワークスペースに作る(社外のワークスペースには社内の情報を載せない)。検証中は ALLOWED_SLACK_USERS で自分だけに限る
 display_information:
-  name: HACARUS Check 相談窓口
+  name: ZERO QA Bot
   description: HACARUS Check 2025 のリポジトリについて質問できるボット(読み取り専用)
 # AI アプリのパネル(会話の一覧)は最初は使わない。使うときは features に assistant_view、
 # スコープに assistant:write、イベントに assistant_thread_started を足し、.env を SLACK_ASSISTANT=true にする(docs/slack-app.md)
@@ -11,7 +11,8 @@ features:
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
   bot_user:
-    display_name: check-qa
+    # メンションに使う名前。英小文字・数字・ハイフンなどだけが使える
+    display_name: zero-qa-bot
     always_online: true
   slash_commands:
     - command: /qa-cost
