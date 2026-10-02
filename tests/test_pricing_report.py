@@ -60,6 +60,9 @@ def test_集計と見込みと評価(prices, tmp_path):
     assert "100 件/月: $20.00" in text
     assert "👍 の割合 50%" in text
     assert "単価表にないモデル" in text
+    assert "中央値" not in text and "90%点" not in text
+    assert "  A: 2 件" in text
+    assert "  <A>: 2 件" in format_summary(s, [100], user_label=lambda u: f"<{u}>")
 
     lines = export_csv(store).strip().splitlines()
     assert lines[0].startswith("id,asked_at_utc") and len(lines) == 4

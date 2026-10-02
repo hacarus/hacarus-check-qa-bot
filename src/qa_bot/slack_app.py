@@ -141,6 +141,11 @@ def bad_reason_view(question_id: int) -> dict[str, Any]:
     }
 
 
+def slack_user_label(user: str) -> str:
+    """Slack ID は <@ID> と書くと、Slack の画面で名前に置き換わる(users:read の権限は要らない)"""
+    return f"<@{user}>" if user.startswith(("U", "W")) else user
+
+
 class SlackHandlers:
     def __init__(self, settings: Settings, service: QAService, prices: PriceTable,
                  fetch: att.Fetcher | None = None):
@@ -357,7 +362,7 @@ class SlackHandlers:
         if not self.service.is_admin(command.get("user_id", "")):
             return "このコマンドは管理者だけが使えます。"
         month = (command.get("text") or "").strip() or None
-        return format_summary(summarize(self.service.store, self.prices, month))
+        return format_summary(summarize(self.service.store, self.prices, month), user_label=slack_user_label)
 
 
 def build_app(settings: Settings, service: QAService, prices: PriceTable):

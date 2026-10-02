@@ -7,7 +7,7 @@ from qa_bot.config import CLI_USER_ID, load_settings
 from qa_bot.service import DailyLimitError, NotAllowedError, QAService
 from qa_bot.slack_app import (
     ACTION_BAD, ACTION_GOOD, NOT_ALLOWED_MESSAGE, REASON_RETRY_MESSAGE, SUGGESTED_PROMPTS, SlackHandlers, answer_blocks, split_text,
-    strip_mention, to_mrkdwn,
+    slack_user_label, strip_mention, to_mrkdwn,
 )
 from qa_bot.store import Store
 from tests.test_pricing_report import record
@@ -439,3 +439,8 @@ async def test_料金の表示は既定でDMだけ(handlers):
 def test_料金の表示場所の設定(base_env, env, expected):
     base_env.update(env)
     assert load_settings(base_env).cost_footer == expected
+
+
+def test_qa_costではSlackが名前に置き換える形でIDを出す():
+    assert slack_user_label("U07NZBMV144") == "<@U07NZBMV144>"
+    assert slack_user_label("cli") == "cli"

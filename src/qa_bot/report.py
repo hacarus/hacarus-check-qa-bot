@@ -7,6 +7,7 @@ import io
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .pricing import PriceTable, TokenUsage
 from .store import Store
@@ -32,12 +33,6 @@ class Summary:
     @property
     def avg_usd(self) -> float:
         return statistics.fmean(self.costs) if self.costs else 0.0
-
-    def percentile(self, p: float) -> float:
-        if not self.costs:
-            return 0.0
-        s = sorted(self.costs)
-        return s[min(len(s) - 1, int(round(p * (len(s) - 1))))]
 
 
 def summarize(store: Store, prices: PriceTable, month: str | None = None) -> Summary:
@@ -84,7 +79,8 @@ def _usd(v: float) -> str:
     return f"${v:,.2f}(約{v * JPY_PER_USD:,.0f}円)"
 
 
-def format_summary(s: Summary, projections: list[int] = (300, 600, 1500)) -> str:
+def format_summary(s: Summary, projections: list[int] = (300, 600, 1500),
+                   user_label: Callable[[str], str] = str) -> str:
     title = s.month or "全期間"
     lines = [f"■ 仮想料金レポート({title})"]
     if s.count == 0:
@@ -95,8 +91,7 @@ def format_summary(s: Summary, projections: list[int] = (300, 600, 1500)) -> str
         f"質問数: {s.count} 件(エラー {s.errors} 件)  認証モード: "
         + ", ".join(f"{k}={v}" for k, v in sorted(s.auth_modes.items())),
         f"合計: {_usd(s.total_usd)}",
-        f"1件あたり: 平均 ${s.avg_usd:.3f} / 中央値 ${s.percentile(0.5):.3f} / "
-        f"90%点 ${s.percentile(0.9):.3f} / 最大 ${max(s.costs) if s.costs else 0:.3f}",
+        f"1件あたり: 平均 ${s.avg_usd:.3f} / 最大 ${max(s.costs) if s.costs else 0:.3f}",
     ]
     if s.good or s.bad:
         lines.append(f"評価: 👍 {s.good} 件 / 👎 {s.bad} 件(👍 の割合 {s.good / (s.good + s.bad):.0%})")
@@ -123,7 +118,7 @@ def format_summary(s: Summary, projections: list[int] = (300, 600, 1500)) -> str
         lines.append("")
         lines.append("利用者別")
         for user, (n, cost) in sorted(s.by_user.items(), key=lambda kv: -kv[1][1]):
-            lines.append(f"  {user}: {n} 件 / ${cost:.2f}")
+            lines.append(f"  {user_label(user)}: {n} 件 / ${cost:.2f}")
     return "\n".join(lines)
 
 
